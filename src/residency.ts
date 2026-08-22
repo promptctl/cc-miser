@@ -1,0 +1,158 @@
+// What is resident in the context window over the call sequence, and what that
+// residency cost.
+//
+// [LAW:effects-at-boundaries] Pure. Takes calls, returns arithmetic.
+
+import type { Arrival, Call } from './calls.ts';
+import { CACHE_READ_MULTIPLE, WRITE_MULTIPLE } from './tokens.ts';
+
+/** A maximal run of calls over which the cached prefix survives.
+ *
+ * A new epoch begins when `cache_read` DROPS relative to the previous call: the
+ * cached prefix is gone, so everything still needed must be re-written at 1.25x
+ * instead of re-read at 0.1x. This is the event PROJECT.md calls cache thrash, and on
+ * the hand-traced specimen a single one of them was 14.6% of the whole session. */
+export interface Epoch {
+  index: number;
+  start: number;
+  end: number;
+  /** Tokens re-written at this boundary that a live cache would have re-read. */
+  rewrittenTokens: number;
+  gapBeforeMs: number;
+}
+
+/** The epochs, plus the epoch each call belongs to.
+ *
+ * [LAW:types-are-the-program] `epochOfCall` is returned rather than recovered later by
+ * scanning for the epoch whose range contains a call. That scan can miss — and every
+ * caller of it wrote `find(...)!` to promise it wouldn't. Building the index here
+ * makes the lookup total by construction, which deletes the promises. */
+export interface Residency {
+  epochs: Epoch[];
+  epochOfCall: number[];
+}
+
+export function findEpochs(calls: readonly Call[]): Residency {
+  const boundaries = [0];
+  for (let i = 1; i < calls.length; i++)
+    if (calls[i]!.usage.cacheRead < calls[i - 1]!.usage.cacheRead) boundaries.push(i);
+
+  const epochs = boundaries.map((start, k) => {
+    const end = (boundaries[k + 1] ?? calls.length) - 1;
+    return {
+      index: k,
+      start,
+      end,
+      rewrittenTokens: k === 0 ? 0 : calls[start]!.usage.cacheCreation,
+      gapBeforeMs: start === 0 ? 0 : calls[start]!.ts - calls[start - 1]!.ts,
+    };
+  });
+
+  const epochOfCall = new Array<number>(calls.length).fill(0);
+  for (const e of epochs) for (let i = e.start; i <= e.end; i++) epochOfCall[i] = e.index;
+  return { epochs, epochOfCall };
+}
+
+/** The excess a single invalidation cost: the same tokens at write price instead of
+ * read price. */
+export const invalidationExcess = (e: Epoch): number =>
+  e.rewrittenTokens * (WRITE_MULTIPLE - CACHE_READ_MULTIPLE);
+
+export interface PerCallCheck {
+  call: number;
+  expected: number;
+  actual: number;
+  delta: number;
+}
+
+export interface ConservationCheck {
+  actualCacheRead: number;
+  predictedCacheRead: number;
+  perCall: PerCallCheck[];
+  /** Calls where the model's prediction was exactly right, to the token. */
+  exactCalls: number;
+}
+
+/** THE CONSERVATION CHECK.
+ *
+ * Two independent routes to one quantity, both built only from exact API numbers.
+ * Route A sums the reported `cache_read`. Route B predicts it from the residency
+ * model: everything written at call i is re-read by every later call in i's epoch. If
+ * the model is right they agree; the gap measures what the model fails to explain, and
+ * is reported rather than hidden. [LAW:no-silent-failure]
+ *
+ * The PER-CALL result is the real evidence. Aggregate agreement is weak — two wrong
+ * numbers can cancel across 28 calls — so the strong claim is that EVERY call's
+ * cache_read equals the sum of every earlier cache_creation in its epoch. It held on
+ * 28 of 28 calls of the hand-traced specimen, which is why residency-derived numbers
+ * are allowed downstream at all. */
+export function conservation(calls: readonly Call[], r: Residency): ConservationCheck {
+  const perCall = calls.map((c) => {
+    const e = r.epochs[r.epochOfCall[c.index]!]!;
+    const expected = calls
+      .slice(e.start, c.index)
+      .reduce((a, prior) => a + prior.usage.cacheCreation, 0);
+    return {
+      call: c.index,
+      expected,
+      actual: c.usage.cacheRead,
+      delta: c.usage.cacheRead - expected,
+    };
+  });
+  return {
+    actualCacheRead: calls.reduce((a, c) => a + c.usage.cacheRead, 0),
+    predictedCacheRead: calls.reduce(
+      (a, c) => a + c.usage.cacheCreation * readsAfter(c.index, r),
+      0,
+    ),
+    perCall,
+    exactCalls: perCall.filter((p) => p.delta === 0).length,
+  };
+}
+
+/** How many later calls re-read what was written at `callIndex`. */
+const readsAfter = (callIndex: number, r: Residency): number =>
+  r.epochs[r.epochOfCall[callIndex]!]!.end - callIndex;
+
+/** True cost of one arrival over its whole life — the number naive accounting misses.
+ *
+ * The figure people quote for a file read is its size. The figure they pay is its size
+ * times how many epochs it lived through and how many calls re-read it: position and
+ * lifetime, not size. On the specimen this was a 3.9x understatement. */
+export interface TrueCost {
+  label: string;
+  estTokens: number;
+  bornAtCall: number;
+  /** One entry per epoch the content lived through; each costs a fresh write. */
+  lives: Array<{ epoch: number; writeAtCall: number; reads: number }>;
+  writeCost: number;
+  readCost: number;
+  total: number;
+  /** What naive accounting would call it: just the size. */
+  naive: number;
+  multiple: number;
+}
+
+export function trueCost(a: Arrival, estTokens: number, r: Residency): TrueCost {
+  const lives: TrueCost['lives'] = [];
+  for (const e of r.epochs) {
+    if (e.end < a.bornBeforeCall) continue; // content did not exist yet
+    const writeAt = Math.max(e.start, a.bornBeforeCall);
+    if (writeAt > e.end) continue;
+    lives.push({ epoch: e.index, writeAtCall: writeAt, reads: e.end - writeAt });
+  }
+  const writeCost = lives.length * estTokens * WRITE_MULTIPLE;
+  const readCost = lives.reduce((s, l) => s + l.reads, 0) * estTokens * CACHE_READ_MULTIPLE;
+  const total = writeCost + readCost;
+  return {
+    label: a.label,
+    estTokens,
+    bornAtCall: a.bornBeforeCall,
+    lives,
+    writeCost,
+    readCost,
+    total,
+    naive: estTokens,
+    multiple: estTokens === 0 ? 0 : total / estTokens,
+  };
+}

@@ -5,22 +5,32 @@
 // kind we consume is a distinct variant; every line kind we don't is still
 // represented (Meta/Unknown) so nothing vanishes silently.
 
+import type { Usage } from './tokens.ts';
+
 /** A content block inside an assistant or user message, reduced to what token
  * accounting needs: its kind, its size in characters, and linkage ids. */
 export type ContentBlock =
   | { kind: 'thinking'; chars: number }
   | { kind: 'text'; chars: number; snippet: string }
-  | { kind: 'tool_use'; id: string; name: string; inputChars: number; inputSummary: string }
+  | {
+      kind: 'tool_use';
+      id: string;
+      name: string;
+      /** Size of the WHOLE input once serialized — never truncated, because this is
+       * the token-accounting figure. */
+      inputChars: number;
+      /** The input's one human-meaningful field (command, path, pattern, ...), capped
+       * at INPUT_TEXT_CAP.
+       *
+       * [LAW:one-source-of-truth] One field, not a `summary` beside a `full`. The
+       * hand trace found that storing only a display-truncated copy sent classifier
+       * rules matching against 90 characters of a command, so a `grep` past the cut
+       * went unclassified. Display truncation is the renderer's job; matching wants
+       * the whole string, and two copies of one string is how they disagreed. */
+      input: string;
+    }
   | { kind: 'tool_result'; toolUseId: string; chars: number }
   | { kind: 'other'; type: string; chars: number };
-
-/** Exact token usage as reported by the API for one request. */
-export interface Usage {
-  input: number;
-  cacheCreation: number;
-  cacheRead: number;
-  output: number;
-}
 
 export interface AssistantLine {
   kind: 'assistant';
@@ -38,7 +48,9 @@ export interface UserLine {
   uuid: string;
   ts: number;
   blocks: ContentBlock[];
-  /** Set when this line delivers a subagent's result back to a Task tool call. */
+  /** Set when this line delivers a spawned conversation's result back to the `Agent`
+   * tool call that started it. (The tool is named `Agent`; `Task` — the name the
+   * design originally assumed — appears nowhere in the corpus.) */
   agentId: string | null;
   /** True when the line only carries tool_result blocks (harness-generated). */
   isToolResult: boolean;
@@ -125,6 +137,12 @@ const jsonChars = (v: unknown): number => {
 const SNIPPET_LEN = 200;
 const snip = (s: string): string => s.slice(0, SNIPPET_LEN);
 
+/** How much of a tool input's text we retain. An `Agent` prompt can run to tens of
+ * kilobytes and is held for every call of every session in a corpus scan; classifier
+ * rules only ever look at the head of a command. `inputChars` still records the true
+ * size, so the cap costs no accounting accuracy. */
+const INPUT_TEXT_CAP = 4000;
+
 function parseBlock(raw: unknown): ContentBlock {
   const b = asObj(raw);
   if (!b) return { kind: 'other', type: 'malformed', chars: jsonChars(raw) };
@@ -141,7 +159,7 @@ function parseBlock(raw: unknown): ContentBlock {
         id: str(b.id),
         name: str(b.name, '(unnamed)'),
         inputChars: jsonChars(b.input),
-        inputSummary: snip(summarizeToolInput(str(b.name), asObj(b.input) ?? {})),
+        input: toolInputText(asObj(b.input) ?? {}).slice(0, INPUT_TEXT_CAP),
       };
     case 'tool_result':
       return { kind: 'tool_result', toolUseId: str(b.tool_use_id), chars: jsonChars(b.content) };
@@ -150,8 +168,9 @@ function parseBlock(raw: unknown): ContentBlock {
   }
 }
 
-/** One human-meaningful line per tool call, for span labels. */
-function summarizeToolInput(name: string, input: Json): string {
+/** The one field of a tool input that says what the call is doing. Ordered most
+ * specific first, so a Bash call reports its command rather than its description. */
+function toolInputText(input: Json): string {
   const first =
     str(input.command) ||
     str(input.file_path) ||
@@ -161,7 +180,7 @@ function summarizeToolInput(name: string, input: Json): string {
     str(input.prompt) ||
     str(input.skill) ||
     '';
-  return first || jsonChars(input).toString() + ' chars';
+  return first || `${jsonChars(input)} chars`;
 }
 
 function parseUsage(raw: unknown): Usage {
@@ -243,4 +262,61 @@ export function parseLine(raw: unknown): SessionLine {
     default:
       return META_TYPES.has(type) ? { kind: 'meta', type } : { kind: 'unknown', type };
   }
+}
+
+/** What the checkpoint saw, so format drift is loud rather than silent.
+ *
+ * PROJECT.md names the unknown-type counter as the early-warning system for Claude
+ * Code version drift: a new line type appears here as a count long before it appears
+ * downstream as a wrong number. [LAW:no-silent-failure] */
+export interface ParseStats {
+  totalLines: number;
+  /** Count per typed variant — how many assistant/user/attachment/... records. */
+  byKind: Record<SessionLine['kind'], number>;
+  /** Count per raw `type` string, including the ones we map to meta/unknown. */
+  byType: Record<string, number>;
+  /** Raw `type` values we have no variant for. Non-empty means the format moved. */
+  unknownTypes: Record<string, number>;
+  /** Lines that were not valid JSON at all. */
+  unparseableLines: number;
+}
+
+const emptyStats = (): ParseStats => ({
+  totalLines: 0,
+  byKind: { assistant: 0, user: 0, attachment: 0, system: 0, meta: 0, unknown: 0 },
+  byType: {},
+  unknownTypes: {},
+  unparseableLines: 0,
+});
+
+const bump = (m: Record<string, number>, k: string): void => {
+  m[k] = (m[k] ?? 0) + 1;
+};
+
+/** Parse a whole transcript's text into records plus the stats about them.
+ *
+ * [LAW:effects-at-boundaries] Takes the text, not a path. Reading the file is the
+ * driver's job, which keeps this — and therefore the entire analysis above it —
+ * testable against a string literal with no filesystem at all. */
+export function parseTranscript(text: string): { lines: SessionLine[]; stats: ParseStats } {
+  const stats = emptyStats();
+  const lines: SessionLine[] = [];
+  for (const raw of text.split('\n')) {
+    if (!raw.trim()) continue;
+    stats.totalLines++;
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(raw);
+    } catch {
+      stats.unparseableLines++;
+      continue;
+    }
+    const line = parseLine(decoded);
+    lines.push(line);
+    stats.byKind[line.kind]++;
+    const rawType = (asObj(decoded) && str(asObj(decoded)!.type, '(untyped)')) || '(untyped)';
+    bump(stats.byType, rawType);
+    if (line.kind === 'unknown') bump(stats.unknownTypes, line.type);
+  }
+  return { lines, stats };
 }
