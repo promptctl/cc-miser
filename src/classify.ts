@@ -7,7 +7,7 @@
 // [LAW:effects-at-boundaries] Pure.
 
 import type { Call } from './calls.ts';
-import { UNCLASSIFIED, type Activity, type Label, type Tier } from './activity.ts';
+import { UNCLASSIFIED, label, type Activity, type DecidedTier, type Label } from './activity.ts';
 
 /** What a rule gets to look at. Flattened from the call so rules stay one-liners. */
 export interface CallFacts {
@@ -21,7 +21,7 @@ export interface CallFacts {
 
 interface Rule {
   activity: Activity;
-  tier: Extract<Tier, 'marker' | 'rule'>;
+  tier: Extract<DecidedTier, 'marker' | 'rule'>;
   because: string;
   matches: (f: CallFacts) => boolean;
 }
@@ -133,13 +133,13 @@ export function classifyCalls(
     const prev = out[out.length - 1];
     out.push(
       hit
-        ? { activity: hit.activity, tier: hit.tier, because: hit.because }
+        ? label(hit.activity, hit.tier, hit.because)
         : prev
-          ? {
-              activity: prev.activity,
-              tier: 'rule',
-              because: "continuation of the preceding call's phase (no tool signal of its own)",
-            }
+          ? label(
+              prev.activity,
+              'rule',
+              "continuation of the preceding call's phase (no tool signal of its own)",
+            )
           : UNCLASSIFIED,
     );
   }

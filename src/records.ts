@@ -113,6 +113,15 @@ const META_TYPES = new Set([
   'summary',
   'auto-mode',
   'date_change',
+  // Found by the corpus smoke scan as UNKNOWN (197 and 20 occurrences), which is the
+  // drift alarm working. Both are bookkeeping carrying no context-window content and no
+  // usage — `{type:"agent-name", agentName:"ci configuration check"}` and
+  // `{type:"agent-setting", agentSetting:"claude"}` — so they are known-and-ignored
+  // rather than unknown. Left in the unknown bucket they would fire the format-drift
+  // warning on every affected session, and an alarm that cries wolf on benign types is
+  // how a real drift gets scrolled past.
+  'agent-name',
+  'agent-setting',
 ]);
 
 type Json = Record<string, unknown>;

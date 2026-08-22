@@ -7,7 +7,7 @@
 // [LAW:effects-at-boundaries] Pure. Analysis in, model out.
 
 import type { AnalyzedSession } from '../session.ts';
-import type { Arrival } from '../calls.ts';
+import { isSessionControl, type Arrival, type Turn } from '../calls.ts';
 import { invalidationExcess, trueCost } from '../residency.ts';
 import { allCalls, isSpawned, isToolSpan, rollup, rollupWhere, type Span } from '../spans.ts';
 import { depthOf } from '../lineage.ts';
@@ -272,25 +272,61 @@ const biggestToolResult = (arrivals: readonly Arrival[]): Arrival | undefined =>
 
 /** The arena: one band per allocation, born at a call, alive until its epoch ends. */
 function strataFor(a: AnalyzedSession): Stratum[] {
-  const sourceAt = new Map<number, StratumSource>();
+  // Characters per source, per call. Dominance is decided by weight, not by whether
+  // anything disagreed — see the note on Stratum.source.
+  const charsBySource = new Map<number, Map<StratumSource, number>>();
   for (const arr of a.conversation.arrivals) {
-    const cur = sourceAt.get(arr.bornBeforeCall);
-    sourceAt.set(arr.bornBeforeCall, cur && cur !== arr.source ? 'mixed' : arr.source);
+    const at = charsBySource.get(arr.bornBeforeCall) ?? new Map<StratumSource, number>();
+    at.set(arr.source, (at.get(arr.source) ?? 0) + arr.chars);
+    charsBySource.set(arr.bornBeforeCall, at);
   }
+
   return a.conversation.calls
     .filter((c) => c.usage.cacheCreation > 0)
-    .map((c) => ({
-      bornAtCall: c.index,
-      epoch: a.residency.epochOfCall[c.index]!,
-      tokens: c.usage.cacheCreation,
-      source: c.index === 0 ? ('startup' as const) : (sourceAt.get(c.index) ?? 'mixed'),
-      label:
-        c.index === 0
-          ? 'startup payload (system prompt, tools, CLAUDE.md)'
-          : (a.conversation.arrivals
-              .filter((x) => x.bornBeforeCall === c.index)
-              .sort((x, y) => y.chars - x.chars)[0]?.label ?? `call ${c.index}`),
-    }));
+    .map((c) => {
+      const arrivals = a.conversation.arrivals.filter((x) => x.bornBeforeCall === c.index);
+      const biggest = [...arrivals].sort((x, y) => y.chars - x.chars)[0];
+      const dominant = dominantSource(charsBySource.get(c.index));
+      // Call 0 is the startup payload by definition — system prompt, tool definitions,
+      // CLAUDE.md, skill listings — none of which arrive as a transcript record.
+      return c.index === 0
+        ? {
+            bornAtCall: 0,
+            epoch: a.residency.epochOfCall[0]!,
+            tokens: c.usage.cacheCreation,
+            source: 'startup' as const,
+            sourceShare: 1,
+            label: 'startup payload (system prompt, tools, CLAUDE.md)',
+          }
+        : {
+            bornAtCall: c.index,
+            epoch: a.residency.epochOfCall[c.index]!,
+            tokens: c.usage.cacheCreation,
+            source: dominant.source,
+            sourceShare: dominant.share,
+            label: biggest?.label ?? `call ${c.index}`,
+          };
+    });
+}
+
+/** The source contributing the most characters, and its share.
+ *
+ * [LAW:parse-dont-validate] A call with no arrivals at all returns `unattributed` with
+ * a zero share, which says "nothing explains this band". Returning the first source, or
+ * a plausible-looking `toolResult`, would be an answer-shaped void — indistinguishable
+ * on the page from a band we genuinely attributed. */
+function dominantSource(byChars: Map<StratumSource, number> | undefined): {
+  source: StratumSource;
+  share: number;
+} {
+  const entries = [...(byChars?.entries() ?? [])];
+  const total = entries.reduce((a, [, v]) => a + v, 0);
+  // Sorted by chars, then by name, so a tie resolves the same way on every run rather
+  // than following Map insertion order.
+  const top = entries.sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))[0];
+  return top && total > 0
+    ? { source: top[0], share: top[1] / total }
+    : { source: 'unattributed', share: 0 };
 }
 
 function flameOf(s: Span): FlameNode {
@@ -306,11 +342,30 @@ function flameOf(s: Span): FlameNode {
   };
 }
 
+/** One line telling a person scanning a list what this session was.
+ *
+ * The opening ask is the useful half, so it must be something a HUMAN said. Preferring
+ * the first `user` turn is what turn origins buy: the earlier version took the first
+ * turn over 20 characters, which in 40% of sessions is a skill body or a slash-command
+ * envelope, and produced twelve rail entries all reading "Base directory for this
+ * skill". A session with no human turn at all (an agent-driven `claude -p` run) says so
+ * rather than borrowing the harness's words. */
 function synopsisFor(a: AnalyzedSession, calls: readonly CallRow[]): string {
   const byActivity = new Map<string, number>();
   for (const c of calls)
     byActivity.set(c.label.activity, (byActivity.get(c.label.activity) ?? 0) + spend(c.usage));
   const dominant = [...byActivity.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? 'unclassified';
-  const firstTurn = a.conversation.turns.find((t) => t.snippet.length > 20)?.snippet ?? '(no user text)';
-  return `${dominant} — ${firstTurn.slice(0, 100)}`;
+
+  // Preference ORDER as data, so the fallback is one lookup rather than a ladder of
+  // ifs. Order is the whole content: the first matching turn in TRANSCRIPT order is
+  // usually `/clear`, and three sessions were named after it — the question is which
+  // KIND of turn best says what a session was for, not which came first.
+  const substantial = (t: Turn): boolean => t.snippet.length > 20;
+  const PREFERENCE: ReadonlyArray<(t: Turn) => boolean> = [
+    (t) => t.origin.kind === 'user' && substantial(t),
+    (t) => t.origin.kind === 'agent' && substantial(t),
+    (t) => t.origin.kind === 'command' && !isSessionControl(t.origin),
+  ];
+  const opening = PREFERENCE.map((p) => a.conversation.turns.find(p)).find(Boolean);
+  return `${dominant} — ${opening ? opening.snippet.slice(0, 100) : 'no stated task — agent-driven throughout'}`;
 }

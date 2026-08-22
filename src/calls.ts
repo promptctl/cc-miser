@@ -57,8 +57,35 @@ export interface ToolExec {
   resultChars: number;
 }
 
+/** WHERE a turn's text came from.
+ *
+ * Not everything arriving as a "user" message was typed by a user. The harness injects
+ * skill bodies, slash-command envelopes, caveats, task notifications, interrupt markers
+ * and compaction summaries down the same channel, and they are 40% of all turns in this
+ * corpus. Left as raw text, every one of them becomes a span label reading
+ * "Base directory for this skill: /Users/you/.claude/plugins/cache/..." — which names
+ * the envelope instead of the work.
+ *
+ * [LAW:types-are-the-program] Origin is a FIELD decided once, not a prefix that each
+ * consumer re-sniffs. The flamegraph, the session rail and the synopsis all want the
+ * same answer, and three independent guesses at it would be three chances to disagree. */
+export type TurnOrigin =
+  /** A person typed it. */
+  | { kind: 'user' }
+  /** A slash command: `<command-name>/next</command-name>`. */
+  | { kind: 'command'; name: string }
+  /** A skill body delivered as a user turn. */
+  | { kind: 'skill'; skill: string }
+  /** Relayed on a user's behalf by another agent. */
+  | { kind: 'agent' }
+  /** Harness bookkeeping: caveats, interrupts, notifications, compaction summaries. */
+  | { kind: 'harness'; what: string };
+
 export interface Turn {
   index: number;
+  origin: TurnOrigin;
+  /** What to put on a label: the user's words, or a short name for the envelope. Never
+   * the envelope's guts. */
   snippet: string;
   firstCall: number;
   lastCall: number;
@@ -77,6 +104,77 @@ export interface Conversation {
 const SUMMARY_LEN = 90;
 const TURN_LEN = 110;
 const display = (s: string, n: number = SUMMARY_LEN): string => s.replace(/\s+/g, ' ').slice(0, n);
+
+/** How a turn's text is recognised, as an ORDERED TABLE.
+ *
+ * [LAW:dataflow-not-control-flow] A newly-observed envelope is a new ROW, never
+ * another branch. Every pattern here was taken from a real transcript rather than
+ * guessed — the eight below cover 40% of the 1,439 turns sampled across the corpus.
+ * Anything unmatched falls through to `user`, which is the honest default: text we
+ * cannot attribute to the harness is text a person probably wrote. */
+const ORIGIN_RULES: ReadonlyArray<{
+  when: RegExp;
+  read: (text: string, m: RegExpExecArray) => { origin: TurnOrigin; snippet: string };
+}> = [
+  {
+    // "Base directory for this skill: /Users/.../plugins/cache/promptctl/laws/0.17.0/skills/code"
+    when: /^Base directory for this skill:\s*(\S+)/,
+    read: (_t, m) => {
+      const skill = m[1]!.split('/skills/').pop() ?? m[1]!;
+      return { origin: { kind: 'skill', skill }, snippet: `skill: ${skill}` };
+    },
+  },
+  {
+    // Either ordering occurs: <command-name> first, or <command-message> first.
+    when: /^<command-(?:name|message)>/,
+    read: (t) => {
+      const name = /<command-name>\/?([^<]*)<\/command-name>/.exec(t)?.[1]?.trim() ?? '?';
+      const args = /<command-args>([^<]*)<\/command-args>/.exec(t)?.[1]?.trim() ?? '';
+      return { origin: { kind: 'command', name }, snippet: `/${name}${args ? ` ${args}` : ''}` };
+    },
+  },
+  {
+    when: /^=== Below is a message from an agent[^\n]*\n([\s\S]*)/,
+    read: (_t, m) => ({
+      origin: { kind: 'agent' },
+      // The relayed message sits between the two === markers.
+      snippet: `via agent: ${m[1]!.split(/\n=== /)[0]!.trim()}`,
+    }),
+  },
+  { when: /^<local-command-caveat>/, read: () => harness('local command caveat') },
+  { when: /^<local-command-stdout>/, read: () => harness('local command output') },
+  { when: /^<task-notification>/, read: () => harness('task notification') },
+  { when: /^\[Request interrupted by user/, read: () => harness('interrupted by user') },
+  { when: /^\[Image: /, read: () => harness('pasted image') },
+  {
+    when: /^This session is being continued from a previous conversation/,
+    read: () => harness('resumed after compaction'),
+  },
+];
+
+const harness = (what: string): { origin: TurnOrigin; snippet: string } => ({
+  origin: { kind: 'harness', what },
+  snippet: `[${what}]`,
+});
+
+/** Commands that operate the session rather than ask for work.
+ *
+ * A session opening with `/clear` is not a session ABOUT clearing. The distinction
+ * matters wherever a turn is used to say what a session was for: three sessions in the
+ * corpus start `/clear`, and naming them after it makes them indistinguishable. */
+const SESSION_CONTROL = new Set(['clear', 'compact', 'model', 'context', 'rewind', 'resume']);
+
+export const isSessionControl = (o: TurnOrigin): boolean =>
+  o.kind === 'command' && SESSION_CONTROL.has(o.name);
+
+/** Decide what a user-channel turn actually is, and what to call it. */
+export function readTurn(text: string): { origin: TurnOrigin; snippet: string } {
+  for (const r of ORIGIN_RULES) {
+    const m = r.when.exec(text);
+    if (m) return r.read(text, m);
+  }
+  return { origin: { kind: 'user' }, snippet: text };
+}
 
 const isToolUse = (b: ContentBlock): b is Extract<ContentBlock, { kind: 'tool_use' }> =>
   b.kind === 'tool_use';
@@ -153,13 +251,16 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
             toolUseId: '',
           });
         // A user line that is not a tool result opens a new turn.
-        if (!line.isToolResult)
+        if (!line.isToolResult) {
+          const t = readTurn(line.snippet);
           turns.push({
             index: turns.length,
-            snippet: display(line.snippet, TURN_LEN),
+            origin: t.origin,
+            snippet: display(t.snippet, TURN_LEN),
             firstCall: nextCall,
             lastCall: nextCall,
           });
+        }
         break;
       }
 

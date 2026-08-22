@@ -79,7 +79,18 @@ export interface Stratum {
   bornAtCall: number;
   epoch: number;
   tokens: number;
+  /** The source that contributed the most CHARACTERS to this band.
+   *
+   * An earlier version marked a band `mixed` the moment two sources disagreed, which
+   * meant almost every band: a call's arrivals nearly always include the previous
+   * call's assistant output alongside whatever else came in. The arena rendered as one
+   * flat colour and said nothing about what was resident. Dominance by character count
+   * is the answer to "what is this band mostly", which is the question the picture is
+   * being asked. */
   source: StratumSource;
+  /** What share of the band the dominant source accounts for, 0..1. Carried so the
+   * simplification above stays visible: a 51% dominance is not the same claim as 98%. */
+  sourceShare: number;
   label: string;
 }
 
@@ -89,7 +100,8 @@ export type StratumSource =
   | 'attachment'
   | 'assistantOutput'
   | 'startup'
-  | 'mixed';
+  /** No arrival explains this band. The honesty bucket, not a blend. */
+  | 'unattributed';
 
 export interface FlameNode {
   name: string;

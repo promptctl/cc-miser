@@ -22,20 +22,43 @@ export type Activity =
 
 /** Which tier of PROJECT.md's cascade decided a label. Cheapest and most certain
  * first; `none` is the honesty bucket and is always rendered, never smoothed away. */
-export type Tier = 'marker' | 'rule' | 'judge' | 'hand' | 'none';
+export type Tier = DecidedTier | 'none';
+
+/** A tier that actually reached a verdict. */
+export type DecidedTier = 'marker' | 'rule' | 'judge' | 'hand';
 
 /** A decided label, with its provenance.
  *
  * [FRAMING:representation] `tier` is a FIELD, not something recovered by sniffing
  * `because` for a `[marker]` prefix. An earlier version wrote the tier into the prose
  * and parsed it back out — one fact stored in its own rendering, which drifts the
- * first time anybody rewords a `because`. */
-export interface Label {
-  activity: Activity;
-  tier: Tier;
-  /** The specific evidence, in words a reader can check against the transcript. */
-  because: string;
-}
+ * first time anybody rewords a `because`.
+ *
+ * [LAW:types-are-the-program] The union forbids the one combination that is a lie:
+ * `unclassified` at any tier but `none`. It was reachable and it was reached — the
+ * catch-all row for "ran tools, but nothing matched" stamped tier `rule`, so 14.7% of
+ * corpus calls were counted as rule-decided when what actually happened is that no
+ * rule fired. That reads on the page as 97% coverage and 0% unknown, which is the
+ * precise shape of an answer-shaped void: it has the form of an answer and means "I
+ * could not do my job". Coverage is the number a reader uses to decide how much of
+ * this page to believe, so it is the last number allowed to flatter itself. */
+export type Label =
+  | { activity: Exclude<Activity, 'unclassified'>; tier: DecidedTier; because: string }
+  | { activity: 'unclassified'; tier: 'none'; because: string };
+
+/** The only way to build a Label, so the invariant above holds by construction rather
+ * than by every call site remembering it. A caller may propose any tier; proposing one
+ * for `unclassified` is silently impossible rather than quietly accepted. */
+export const label = (activity: Activity, tier: DecidedTier, because: string): Label =>
+  activity === 'unclassified' ? { activity, tier: 'none', because } : { activity, tier, because };
+
+/** The same verdict with a different explanation — used when a spawned conversation
+ * inherits its spawner's label and needs to say where the label came from.
+ *
+ * Lives here, beside the type, because rebuilding a Label field-by-field at a call site
+ * is exactly how the forbidden combination gets reintroduced. */
+export const withReason = (l: Label, because: string): Label =>
+  l.activity === 'unclassified' ? { ...l, because } : { ...l, because };
 
 /** The honesty bucket. Not a fallback that makes coverage look complete — a stated
  * absence of evidence, rendered as such. */
