@@ -68,18 +68,29 @@ call, the permission-denied retry, the third full read of the same file. Cause �
 outcome is the optimization story in two words: *harness-caused, zero-outcome*
 spend is pure overhead.
 
-**A span links beyond its parent.** Spawner links join a Task call to the subagent
-trace it started (found on disk in `subagents/agent-<id>.jsonl`, keyed by the
-`agentId` in the parent's tool result). Reference links join spans touching the
-same entity — the same file re-read, the same command re-run. And some things are
-instants, not intervals: compaction boundaries, cache invalidations, model
-switches.
+**A span links beyond its parent.** Spawner links join an `Agent` call — or a
+forking `Skill` call — to the conversation it started, on disk at
+`<project>/<sessionId>/subagents/agent-<agentId>.jsonl`. That directory is flat
+while the spawn structure is a tree, so resolving it is a fixpoint rather than a
+pass over the root: a grandchild's spawning `tool_use` lives inside *another
+subagent's* transcript. Two edge kinds exist and both are needed — an exact
+`tool_use` edge from the sidecar `meta.json`, and a command edge for slash-command
+forks, which leave no `tool_use` block at all and must be placed by depth. So a
+conversation's identity is the *chain* of spawns that reached it, and depth is that
+chain's length — a pivot axis, not a main-vs-subagent flag. Reference links join
+spans touching the same entity — the same file re-read, the same command re-run.
+And some things are instants, not intervals: compaction boundaries, cache
+invalidations, model switches.
 
 One data trap, recorded because it invalidates naive analysis: a single API
-response fans out to ~5 JSONL lines (one per content block), each repeating the
-identical usage object. Sum without deduplicating by `requestId` and every number
-is ~5× wrong. cc-miser dedupes at the parse boundary so nothing downstream can
-make the mistake.
+response fans out to several JSONL lines (one per content block), each repeating
+the identical usage object. Sum without deduplicating by `requestId` and every
+number is multiples too large. cc-miser dedupes at the parse boundary — but the
+rule needs stating precisely, because one obvious reading of it destroys the tree.
+A call is the *group* of lines sharing a `requestId`: its usage is taken **once**,
+and its content blocks are the **union** of the whole group. Identity and payload
+are different maps of the same call, and collapsing both with the same operation
+silently drops most of the session's tool calls.
 
 ## The activity layer
 
