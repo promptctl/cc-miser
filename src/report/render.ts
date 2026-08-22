@@ -13,7 +13,17 @@
 // that bill — a forensic statement of account on bone paper, hairline-ruled, set in
 // tabular figures, with the waste in accountant's red.
 
-import type { CorpusReport, SessionReport, Ledger, Finding, Stratum, FlameNode, Cost, Activity } from './model.ts';
+import type {
+  Activity,
+  CorpusReport,
+  Cost,
+  Coverage,
+  Finding,
+  FlameNode,
+  Ledger,
+  SessionReport,
+  Stratum,
+} from './model.ts';
 
 // ---------------------------------------------------------------------------
 // Formatting. A Cost renders WITH its projection; there is no path that prints a
@@ -67,7 +77,7 @@ const SOURCE_COLOR: Record<Stratum['source'], string> = {
   assistantOutput: '#8A5A2B',
   userText: '#4A6741',
   attachment: '#9A7B3B',
-  mixed: '#7A6A55',
+  unattributed: '#B3AB9C',
 };
 
 // ---------------------------------------------------------------------------
@@ -138,17 +148,38 @@ function stratigraphy(s: SessionReport): string {
       const y0 = y(base + st.tokens);
       const y1 = y(base);
       const h = Math.max(0.8, y1 - y0);
-      return `<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${Math.max(1, x1 - x0).toFixed(1)}" height="${h.toFixed(1)}" fill="${SOURCE_COLOR[st.source]}" opacity="0.82"><title>${esc(st.label)} — born call ${st.bornAtCall}, ${n(st.tokens)} tokens, alive to call ${ep.endCall}</title></rect>`;
+      // The tooltip carries the dominance share, so a band coloured `toolResult` at 51%
+      // does not read as the same claim as one at 98%.
+      return `<rect x="${x0.toFixed(1)}" y="${y0.toFixed(1)}" width="${Math.max(1, x1 - x0).toFixed(1)}" height="${h.toFixed(1)}" fill="${SOURCE_COLOR[st.source]}" opacity="0.82"><title>${esc(st.label)} — born call ${st.bornAtCall}, ${n(st.tokens)} tokens, alive to call ${ep.endCall}
+mostly ${st.source} (${pct(st.sourceShare)} of the characters that arrived here)</title></rect>`;
     })
     .join('');
 
+  // Invalidations cluster, and every label was drawn on the same baseline at the same
+  // offset — so on a session with five of them the words overprinted each other into
+  // "93,640hee-invalidated". Each label drops a row until it clears the previous one,
+  // and one close to the right edge is anchored from its line so it cannot run off the
+  // chart. Both are decided from the x it will actually be drawn at.
+  const LABEL_ROW = 11;
+  const CHAR_W = 5.4;
+  /** Rightmost x already occupied on each row. A label takes the first row whose
+   * occupied span it clears, which is what "does this collide" actually means —
+   * comparing only against the PREVIOUS label lets a third one land back on row 0
+   * underneath the first. */
+  const rowEnds: number[] = [];
   const cliffs = s.epochs
     .slice(1)
-    .map(
-      (e) =>
-        `<line x1="${x(e.startCall).toFixed(1)}" y1="${PAD.t}" x2="${x(e.startCall).toFixed(1)}" y2="${H - PAD.b}" class="cliff"/>
-         <text x="${(x(e.startCall) + 5).toFixed(1)}" y="${PAD.t + 12}" class="cliff-label">cache invalidated · ${n(e.rewrittenTokens)} re-written</text>`,
-    )
+    .map((e) => {
+      const cx = x(e.startCall);
+      const text = `cache invalidated · ${n(e.rewrittenTokens)} re-written`;
+      const width = text.length * CHAR_W;
+      const flip = cx + width > W - PAD.r;
+      const free = rowEnds.findIndex((end) => cx > end);
+      const row = free === -1 ? rowEnds.length : free;
+      rowEnds[row] = cx + width;
+      return `<line x1="${cx.toFixed(1)}" y1="${PAD.t}" x2="${cx.toFixed(1)}" y2="${H - PAD.b}" class="cliff"/>
+         <text x="${(cx + (flip ? -5 : 5)).toFixed(1)}" y="${PAD.t + 10 + row * LABEL_ROW}" class="cliff-label"${flip ? ' text-anchor="end"' : ''}>${text}</text>`;
+    })
     .join('');
 
   const ticks = [0, 0.5, 1]
@@ -159,9 +190,15 @@ function stratigraphy(s: SessionReport): string {
     })
     .join('');
 
+  // Each key carries how much of the arena that source dominates, so the legend says
+  // what the picture is made of rather than only which colours appear in it.
+  const totalTokens = Math.max(1, s.strata.reduce((a, st) => a + st.tokens, 0));
   const legend = (Object.keys(SOURCE_COLOR) as Array<Stratum['source']>)
     .filter((k) => s.strata.some((st) => st.source === k))
-    .map((k) => `<span class="key"><i style="--c:${SOURCE_COLOR[k]}"></i>${k}</span>`)
+    .map((k) => {
+      const share = s.strata.filter((st) => st.source === k).reduce((a, st) => a + st.tokens, 0) / totalTokens;
+      return `<span class="key"><i style="--c:${SOURCE_COLOR[k]}"></i>${k} <b>${pct(share)}</b></span>`;
+    })
     .join('');
 
   return `<section class="panel wide">
@@ -215,9 +252,16 @@ function flame(root: FlameNode): string {
   </section>`;
 }
 
-function coverageBar(s: SessionReport): string {
-  const parts = (Object.entries(s.coverage.byTier) as Array<[string, number]>).filter(([, v]) => v > 0.0005);
-  const seg = parts
+/** The trust bar: which tier of the cascade decided each share of the spend.
+ *
+ * The unclassified figure is stated ALWAYS, including when it is zero. A page that
+ * mentions its unknowns only when it has some teaches the reader to read silence as
+ * "none", and silence is also what a broken honesty bucket looks like. Saying "0.0%
+ * unclassified" is a claim that can be wrong; saying nothing is not. */
+function coverageBar(cov: Coverage): string {
+  const seg = (Object.entries(cov.byTier) as Array<[string, number]>)
+    // A zero-width segment cannot be drawn; the figure it would carry is in the note.
+    .filter(([, v]) => v > 0.0005)
     .map(
       ([k, v]) =>
         `<span class="cov-seg cov-${k}" style="width:${v * 100}%"><em>${k} ${pct(v)}</em></span>`,
@@ -226,15 +270,84 @@ function coverageBar(s: SessionReport): string {
   return `<div class="coverage">
     <div class="cov-bar">${seg}</div>
     <p class="cov-note">How every percentage on this page was decided.
-      ${s.coverage.unclassified > 0 ? `<strong>${pct(s.coverage.unclassified)} is unclassified</strong> and is shown as its own row rather than distributed away.` : 'Nothing is unclassified.'}</p>
+      <strong>${pct(cov.unclassified)} of spend is unclassified</strong> — carried as its own
+      row rather than distributed across the others.</p>
   </div>`;
+}
+
+/** The corpus view.
+ *
+ * PROJECT.md's founding question — how much goes to reviewing versus making changes —
+ * is a question about a HISTORY, not about one session. The corpus ledgers answering it
+ * were being computed and then never rendered, so the corpus view was just the session
+ * rail and the page could not answer the question it exists for.
+ *
+ * The share of spend that is unclassified is stated beside the answer rather than in a
+ * footnote, because with 14% unknown corpus-wide, "0.6% review" and "0.6% review, 14%
+ * unknown" are different claims and only the second one is true. */
+function corpusSection(c: CorpusReport): string {
+  const activity = c.ledgers.find((l) => l.id === 'corpus-activity');
+  const shareOf = (key: string): number =>
+    activity?.rows.find((r) => r.key === key)?.share ?? 0;
+
+  const calls = c.sessions.reduce((a, s) => a + s.calls.length, 0);
+  const spanned = {
+    from: Math.min(...c.sessions.map((s) => s.startedAt)),
+    to: Math.max(...c.sessions.map((s) => s.endedAt)),
+  };
+  const projects = new Set(c.sessions.map((s) => s.project)).size;
+
+  return `<article class="session corpus on" data-panel="corpus">
+    <header class="masthead">
+      <div class="mh-left">
+        <div class="eyebrow">The whole account</div>
+        <h2>Every session</h2>
+        <div class="sub">${c.sessions.length} sessions · ${projects} projects · ${day(spanned.from)} — ${day(spanned.to)}</div>
+      </div>
+      <div class="mh-right">
+        <div class="total">${n(c.total.value)}</div>
+        <div class="total-unit">token-equivalents<br><span>input×1 + cache-write×1.25 + cache-read×0.1, plus output</span></div>
+        <div class="total-usd">${money(c.totalUsd)}</div>
+      </div>
+    </header>
+
+    <div class="strip">
+      <div><b>${c.sessions.length}</b><span>sessions</span></div>
+      <div><b>${n(calls)}</b><span>API calls</span></div>
+      <div><b>${money(c.totalUsd)}</b><span>total</span></div>
+      <div><b>${n(c.total.value / Math.max(1, calls))}</b><span>tok-eq per call</span></div>
+      <div><b>${pct(c.coverage.unclassified)}</b><span>unclassified</span></div>
+    </div>
+
+    <section class="panel founding">
+      <h3>The founding question</h3>
+      <p class="lede">"How much do I spend reviewing versus actually making changes?" Every
+        call in every session above belongs to exactly one activity, so this is a query
+        over real history rather than an impression.</p>
+      <div class="fq">
+        <div class="fq-cell"><b>${pct(shareOf('review'))}</b><span>review</span></div>
+        <div class="fq-cell"><b>${pct(shareOf('implementation'))}</b><span>implementation</span></div>
+        <div class="fq-cell"><b>${pct(shareOf('exploration'))}</b><span>exploration</span></div>
+        <div class="fq-cell muted"><b>${pct(shareOf('unclassified'))}</b><span>unclassified</span></div>
+      </div>
+      <p class="cov-note">The last figure is the honest one: that share of spend matched no
+        marker and no tool signature, and is counted nowhere else on this page.</p>
+    </section>
+
+    <div class="ledgers">${c.ledgers.map(ledgerBlock).join('')}</div>
+
+    <section class="panel">
+      <h3>How much to trust this page</h3>
+      ${coverageBar(c.coverage)}
+    </section>
+  </article>`;
 }
 
 function sessionSection(s: SessionReport, idx: number): string {
   const wall = s.endedAt - s.startedAt;
   const cons = s.conservation;
   const exact = cons.callsExact === cons.callsChecked;
-  return `<article class="session" id="s-${idx}" data-session="${idx}">
+  return `<article class="session" id="s-${idx}" data-panel="${idx}">
     <header class="masthead">
       <div class="mh-left">
         <div class="eyebrow">Statement of account</div>
@@ -269,7 +382,7 @@ function sessionSection(s: SessionReport, idx: number): string {
 
     <section class="panel">
       <h3>How much to trust this page</h3>
-      ${coverageBar(s)}
+      ${coverageBar(s.coverage)}
       <div class="checks">
         <div class="check ${exact ? 'ok' : 'warn'}">
           <b>${exact ? 'Residency reconstruction is exact' : 'Residency reconstruction does not reconcile'}</b>
@@ -291,11 +404,14 @@ function sessionSection(s: SessionReport, idx: number): string {
 // ---------------------------------------------------------------------------
 
 export function renderCorpus(c: CorpusReport): string {
+  // The synopsis is what distinguishes two sessions of the same project — without it,
+  // five entries all read "home-infra" and the rail is a list of indistinguishable rows.
   const index = c.sessions
     .map(
-      (s, i) => `<li><button data-go="${i}" class="${i === 0 ? 'on' : ''}">
+      (s, i) => `<li><button data-go="${i}">
         <span class="ix-proj">${esc(s.project.replace(/^-Users-you-code-/, ''))}</span>
         <span class="ix-cost">${money(s.totalUsd)}</span>
+        <span class="ix-syn">${esc(s.synopsis)}</span>
         <span class="ix-sub">${esc(s.sessionId.slice(0, 8))} · ${s.calls.length} calls · ${dur(s.endedAt - s.startedAt)}</span>
       </button></li>`,
     )
@@ -352,7 +468,13 @@ body::before{
 .rail button.on{border-left-color:var(--red); background:var(--paper); color:var(--ink)}
 .ix-proj{display:inline-block; max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; font-weight:600; font-size:13px}
 .ix-cost{float:right; font-family:var(--mono); font-size:12px; color:var(--red)}
-.ix-sub{display:block; font-size:10.5px; color:var(--ink-3); font-family:var(--mono); margin-top:2px}
+/* Two lines, clamped: enough of the synopsis to tell two sessions of one project
+   apart, not so much that the rail becomes the report. */
+.ix-syn{display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+  font-size:11px; line-height:1.35; color:var(--ink-2); margin-top:3px}
+.ix-sub{display:block; font-size:10.5px; color:var(--ink-3); font-family:var(--mono); margin-top:3px}
+.rail ul.overview{border-bottom:1px solid var(--rule)}
+.rail ul.overview .ix-proj{font-family:var(--display); font-size:15px; max-width:none}
 
 /* ---- main ---- */
 .main{padding:36px 44px 120px; max-width:1180px}
@@ -426,6 +548,15 @@ body::before{
 .ledger .bar span{display:block; height:7px; background:var(--c); opacity:.72}
 .swatch{display:inline-block; width:8px; height:8px; background:var(--c); margin-right:7px}
 
+/* the founding question */
+.fq{display:grid; grid-template-columns:repeat(4,1fr); gap:0; border-top:1px solid var(--ink);
+  border-bottom:1px solid var(--rule); margin-bottom:10px}
+.fq-cell{padding:16px 0 14px; border-right:1px solid var(--rule-2)}
+.fq-cell:last-child{border-right:0}
+.fq-cell b{display:block; font-family:var(--display); font-size:38px; line-height:1; letter-spacing:-.02em}
+.fq-cell span{font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3)}
+.fq-cell.muted b{color:var(--ink-3)}
+
 /* trust */
 .coverage{margin-bottom:18px}
 .cov-bar{display:flex; height:22px; border:1px solid var(--rule); background:var(--paper-2)}
@@ -458,21 +589,30 @@ body::before{
         <span>${c.sessions.length} sessions · ${n(c.total.value)} tok-eq</span>
       </div>
     </div>
+    <ul class="overview"><li><button data-go="corpus" class="on">
+      <span class="ix-proj">Every session</span>
+      <span class="ix-syn">the corpus, and the founding question</span>
+    </button></li></ul>
     <h2>Sessions by cost</h2>
     <ul>${index}</ul>
   </nav>
-  <main class="main">${c.sessions.map(sessionSection).join('')}</main>
+  <main class="main">${corpusSection(c)}${c.sessions.map(sessionSection).join('')}</main>
 </div>
 <script>
-const show = (i) => {
-  document.querySelectorAll('.session').forEach((el, k) => el.classList.toggle('on', k === i));
-  document.querySelectorAll('.rail button').forEach((b, k) => b.classList.toggle('on', k === i));
+// Panels are addressed by KEY, not by position. An earlier version matched the nth
+// article to the nth button, so adding the corpus overview at the top would have
+// silently shifted every session by one.
+const show = (key) => {
+  document.querySelectorAll('[data-panel]').forEach((el) => el.classList.toggle('on', el.dataset.panel === key));
+  document.querySelectorAll('.rail button').forEach((b) => b.classList.toggle('on', b.dataset.go === key));
   document.querySelector('.main').scrollTo(0, 0);
   window.scrollTo(0, 0);
 };
 document.querySelectorAll('.rail button').forEach((b) =>
-  b.addEventListener('click', () => show(Number(b.dataset.go))));
-show(0);
+  b.addEventListener('click', () => show(b.dataset.go)));
+// Exposed so the screenshot harness can select a panel without synthesising a click.
+window.show = show;
+show('corpus');
 </script>
 </body></html>`;
 }

@@ -7,7 +7,7 @@ import type { Call, Conversation } from './calls.ts';
 import { directChildren, type PlacedConversation } from './forest.ts';
 import { ROOT, depthOf, immediateAgent, lineagePath, type Lineage } from './lineage.ts';
 import { ZERO_USAGE, addUsage, type Usage } from './tokens.ts';
-import type { Label } from './activity.ts';
+import { withReason, type Label } from './activity.ts';
 
 export type SpanDetail =
   | { kind: 'session'; sessionId: string }
@@ -136,11 +136,11 @@ function buildConversationSpan(
       kid.conversation,
       kid.lineage,
       all,
-      () => ({
-        activity: inherited.activity,
-        tier: inherited.tier,
-        because: `inherited via ${lineagePath(kid.lineage)} from call ${atCall}: ${inherited.because}`,
-      }),
+      () =>
+        withReason(
+          inherited,
+          `inherited via ${lineagePath(kid.lineage)} from call ${atCall}: ${inherited.because}`,
+        ),
       {
         id: `subagent:${kid.meta.agentId}`,
         label: `subagent(${kid.meta.agentType}): ${kid.meta.description}`,
