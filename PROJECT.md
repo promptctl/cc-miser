@@ -8,135 +8,235 @@ and results, and complete subagent transcripts. That is not telemetry we need to
 start collecting. It is 428MB of precise, already-collected trace data sitting in
 `~/.claude/projects`, across ~610 sessions, waiting for a viewer.
 
-cc-miser is that viewer. It treats a Claude Code session as what it structurally is —
-a distributed trace — and renders it the way traces are rendered: nested spans you
-can zoom into. But where Jaeger and Datadog answer "where did the *time* go," cc-miser
-answers **"where did the *tokens* go"** — precisely enough to find the overhead and
-cut it.
+cc-miser is that viewer. It treats a session as what it structurally is — a
+distributed trace — and renders it the way traces are rendered: nested spans you can
+zoom into. But where Jaeger answers "where did the *time* go," cc-miser answers two
+harder questions: **where did the tokens go**, and **what phase of the work were
+they buying**. Precisely enough to find the overhead and cut it.
 
-## The atom
+## What a span is
 
-One API call is the atom. Everything the tool does is built from this unit:
+The span model is the whole design; everything else is a projection of it. A span
+here is richer than a trace viewer's `{name, start, end, parent}` in five specific
+ways.
 
-> An API call has an exact, non-negotiable cost (the `usage` block), a position in a
-> tree (session → turn → call → tool execution → nested subagent session), and a set
-> of *attributable causes* — the user's prompt, tool results, harness-injected
-> attachments, the previous call's output — whose sizes we can estimate.
+**A span's identity is a set of dimensions, not a name.** Tool name, file path,
+command, model, agent type, skill invoked, project, git branch, hook name,
+attachment type, CC version. These are pivot axes in the OLAP sense: the interesting
+questions ("what does *Read on files over 1k lines* cost across all projects?") cut
+across the trace hierarchy, not down it. The tree is one grouping of the span set;
+the span set is the real object.
 
-Exact costs roll *up* the tree without ambiguity. Estimated causes break costs *down*
-within a call, always with an explicit `unattributed` remainder so the estimates can
-never quietly disagree with the exact totals. That honesty rule — exact numbers are
-authoritative, estimates are labeled and never adjust them — is the one invariant
-everything else hangs on.
+**A span has three extents, not one.**
 
-## Why this is worth building
+- *Wall time* — the classic axis. It hides one fact worth surfacing: the gap
+  between assistant-done and next-user-prompt is the human's latency, and
+  separating your think-time from the agent's work-time changes every reading of
+  "where did this session go."
+- *Call index* — the conversation's true clock. Cost only happens at API calls;
+  they are the ticks. Two spans adjacent in wall time can be identical in
+  cost-time.
+- *Context residency* — the extent no trace model has, and the one that dominates
+  the economics. A tool result is not a cost event; it is an **allocation in a
+  replayed arena**. It is born once as `cache_creation` (1.25× base price), then
+  re-read as `cache_read` (0.1×) on *every subsequent call* until it dies by
+  compaction, `/clear`, or session end — and a cache invalidation mid-life forces
+  re-writing everything still resident.
 
-The overhead you want to optimize is largely invisible in normal use. Three examples
-already confirmed in the data:
+The residency extent is why naive accounting understates overhead by an order of
+magnitude. A 10k-token Bash output born at call 5 of a 100-call session costs
+10k × 1.25 to write plus 10k × 0.1 × 95 in reads — roughly 107k token-equivalents.
+The same output at call 95 costs about 13k. Same content, same size, 8× different
+true cost. **Position and lifetime, not size, determine what content costs**, which
+means the expensive content is whatever arrives early and lives long: the startup
+payload, hooks that fire every turn, the harness's accumulating reminders.
 
-- **The harness talks to itself on your bill.** `attachment` records — task
-  reminders, token-count reminders, hook context, skill listings, agent listings —
-  are context injected on the harness's initiative, not yours. Each one becomes
-  `cache_creation` tokens on your next call. Nobody has ever seen these summed.
-- **Session startup has a fixed cost you pay every time.** The first call of every
-  session writes the system prompt, CLAUDE.md, and the full skill/agent listing into
-  cache. Per-project startup cost is directly measurable and directly optimizable
-  (that skill listing alone is thousands of tokens).
-- **Tool output is unmetered today.** A chatty `Bash` call or a full-file `Read`
-  lands in context forever. Attributing input growth to tool names — "Bash results
-  cost you 1.4M tokens this month" — is exactly the lever you need to tune
-  truncation, allowlists, and habits.
+**A span's cost is a vector, never a scalar.** Uncached input, cache write (5m and
+1h), cache read, output — five price classes spanning a 50× range. Dollars are one
+projection of the vector; "tokens" as a single number is another, and any
+single-number view must say which projection it is. Exact vectors exist at the
+API-call level and roll up the tree without ambiguity. Below the call, causes are
+*estimated* (chars/4) and always carry an explicit `unattributed` remainder, so the
+estimates can never quietly disagree with the exact totals. That honesty rule —
+exact numbers are authoritative, estimates are labeled and never adjust them — is
+the invariant everything hangs on.
 
-One data trap worth recording because it invalidates naive analysis: a single API
-response fans out to ~5 JSONL lines (one per content block), and every line repeats
-the identical usage object. Sum without deduplicating by `requestId` and every number
-is ~5× wrong. cc-miser dedupes at the parse boundary so nothing downstream can make
-that mistake.
+**A span has a cause and an outcome.** Who put it in context: the user, the harness
+(reminders, hook output, skill listings), the model's own choices (thinking,
+verbosity), or a tool. And what it bought: progress, or waste — the failed tool
+call, the permission-denied retry, the third full read of the same file. Cause ×
+outcome is the optimization story in two words: *harness-caused, zero-outcome*
+spend is pure overhead.
+
+**A span links beyond its parent.** Spawner links join a Task call to the subagent
+trace it started (found on disk in `subagents/agent-<id>.jsonl`, keyed by the
+`agentId` in the parent's tool result). Reference links join spans touching the
+same entity — the same file re-read, the same command re-run. And some things are
+instants, not intervals: compaction boundaries, cache invalidations, model
+switches.
+
+One data trap, recorded because it invalidates naive analysis: a single API
+response fans out to ~5 JSONL lines (one per content block), each repeating the
+identical usage object. Sum without deduplicating by `requestId` and every number
+is ~5× wrong. cc-miser dedupes at the parse boundary so nothing downstream can
+make the mistake.
+
+## The activity layer
+
+The mechanical tree says *what happened*: turn, call, tool. A second hierarchy over
+the same spans says *what the work was for*: figuring out what to do next,
+exploring the codebase, designing, implementing, verifying, debugging, reviewing,
+committing, grooming the backlog, reporting back. This is the layer where "optimize
+the overhead" becomes "optimize the process," and it exists to answer questions
+like: **on average, what percentage of a session's cost is the code review process,
+and how does that compare to the cost of making the changes?**
+
+The taxonomy is a first-class, versioned artifact — every percentage is relative to
+it, so it cannot be ad-hoc labels scattered through code. Draft leaves:
+`orientation`, `exploration`, `design`, `implementation`, `verification`,
+`debugging`, `review`, `scm`, `process`, `reporting`, `overhead`, and
+`unclassified` — an honesty bucket, never a silent gap.
+
+Classification is a cascade, cheapest and most certain first, every label carrying
+its provenance and confidence:
+
+1. **Explicit markers, free and exact.** The transcripts self-label constantly:
+   skill invocations name activities outright (`/code-review` → review, `/next`
+   and `/groom-backlog` → orientation and process, `/organize-commits` → scm),
+   subagent types carry intent (Explore → exploration, Plan → design), and
+   plan-mode entry/exit brackets design phases.
+2. **Tool-signature rules, deterministic.** Runs of Grep/Glob/Read with no edits
+   are exploration; Edit/Write bursts are implementation; Bash running tests is
+   verification; git and gh commands are scm.
+3. **An LLM judge for the remainder.** The model narrates its own phases ("Now let
+   me run the tests…"), so a classifier reading a cheap projection of each turn —
+   user text, assistant snippets, tool names, never tool outputs — labels what the
+   rules can't. Napkin math: the full 610-session backlog is roughly $10 of Haiku,
+   or free on local Ollama, classified once and cached by content hash forever.
+
+The invariant that makes the percentages trustworthy: activity spans **partition
+the call sequence**. Every API call belongs to exactly one leaf activity — no gaps,
+no overlaps — so activities always sum to 100% of a session and "what share went to
+review" is a query, not a judgment call. Tool executions inherit their call's
+activity; a subagent's entire trace inherits the activity of the call that spawned
+it, so a review subagent's whole burn is review cost. Reports state coverage
+honestly: what share of spend was labeled by marker, by rule, by model, and not at
+all.
+
+What the layer unlocks, beyond the founding question: the comprehension multiplier
+(exploration tokens per implementation token, per project — a direct measure of
+whether a project's CLAUDE.md is doing its job); process ROI (does `/next` make
+orientation cheaper? does review-in-a-subagent beat inline review, given that it
+also keeps the diff out of the parent's resident context?); activity × cause
+(inside review, how much is reading diffs and how much is reminder silt); activity
+× outcome (debugging episodes that ended in reverts, priced); and eventually the
+delivery join — sessions record their commits and PR links, so cost can be joined
+to shipped artifacts: tokens per merged PR, decomposed by phase, trended over time.
+
+## The views
+
+Three renderings of the span set, in ascending order of novelty:
+
+1. **The waterfall** — spans over wall time, nested, the classic trace UI. Free:
+   export Chrome Trace Event JSON and load it in ui.perfetto.dev, which brings
+   zoom, search, and a SQL engine. Exported twice — *time domain*, and *token
+   domain* where span width is cost, so Perfetto's whole toolset operates on spend.
+2. **The flamegraph** — the tree weighted by tokens (or dollars), zoomable,
+   rendered with d3-flame-graph in a self-contained HTML report beside the
+   aggregate ledgers: cost by tool, by attachment type, by activity, by project,
+   by model; cache economics; startup cost.
+3. **The stratigraphy** — the arena view, which we believe does not exist anywhere
+   yet: call index on x, context-window offset on y, every content item a colored
+   stratum (by cause or activity) running rightward through its residency.
+   Compactions appear as cliffs, cache invalidations as full-column flashes, the
+   harness's reminder silt visibly thickening. This is a memory profiler's
+   allocation timeline applied to a context window, and it renders the true-cost
+   model directly.
+
+Because spans are attribute-rich events, a fourth door opens cheaply: emit genuine
+OTLP and point real backends at it — SigNoz or Tempo locally, Honeycomb if wanted,
+whose entire product is "which high-cardinality attribute explains this cost."
 
 ## What we build first
 
-A pipeline with four stages, each pure after the file reads at the front:
+A pipeline of five stages, pure after the file reads at the front:
 
 1. **discover** — walk `~/.claude/projects`, pair each session with its subagent
-   transcripts (`subagents/agent-<id>.jsonl`, linked from the parent's Task tool
-   result by `agentId`).
+   transcripts.
 2. **parse** — one checkpoint stamps raw JSONL into typed records. Unknown line
-   types are counted and reported, never silently dropped; one malformed line never
-   sinks the corpus scan.
-3. **build** — records become a span tree: session → turn → API call → tool
-   execution, with subagent sessions grafted under the Task calls that spawned them.
-   Exact usage on every call; estimated attribution beneath it.
-4. **render** — pure functions from the tree to two artifacts:
-   - **An HTML report**: a zoomable token-weighted flamegraph (d3-flame-graph — an
-     existing, purpose-built library) plus aggregate tables: tokens by tool, by
-     attachment type, by project, by model; cache economics; startup overhead.
-   - **A Chrome Trace Event file** you load into [ui.perfetto.dev](https://ui.perfetto.dev)
-     — a professional trace-span UI for free, in two flavors: *time domain* (spans
-     are wall-clock, the classic waterfall) and *token domain* (span width is token
-     count, so Perfetto's zoom, search, and SQL query engine all operate on cost).
+   types are counted and reported, never dropped; one malformed line never sinks a
+   400MB scan.
+3. **build** — records become the span tree: session → turn → API call → tool
+   execution, subagents grafted under their Task calls, allocations given their
+   birth/death, exact usage on every call, estimated attribution beneath.
+4. **classify** — the activity cascade, pure given the tree plus cached judge
+   verdicts; LLM calls live at the boundary and their verdicts are cached locally
+   so re-renders never re-pay.
+5. **render** — pure functions from the tree to the artifacts above.
 
-That alone answers the founding question — "what do I spend tokens doing" — with
-real numbers over the full history. Everything past it is leverage on top of a
-working profiler.
+The profiler (stages 1–3 plus the waterfall and flamegraph) answers "what do I
+spend tokens doing" with real numbers over the full history. The activity layer
+answers "what phase of my process is expensive." Everything past that is leverage
+on a working instrument.
 
 ## How far can we take this?
 
-Far. The arc runs from *profiler* to *advisor* to *instrument*, and the data supports
-each step. In rough order of confidence:
+In rough order of confidence:
 
-**Attribution science** (high confidence — the data is already verified). A harness
-overhead ledger: what fraction of your total spend is task reminders, hook context,
-skill listings, system re-caching — per project, per config era. Cache-thrash
-detection: a call whose `cache_read` drops to zero mid-session is a cache
-invalidation you paid to rebuild; find them, date them, correlate them with what
-changed. Compaction analysis: `compact_boundary` records mark context resets — how
-much did each compaction cost and save? Startup cost per project, trended.
+**Attribution science** (high — the data is verified). The harness overhead ledger:
+what fraction of spend is reminders, hook context, skill listings, re-caching — per
+project, per config era. True-cost accounting via residency. Cache-thrash
+detection: a call whose `cache_read` collapses mid-session is an invalidation you
+paid to rebuild; find them, date them, correlate them with what changed. Compaction
+cost/benefit. Startup cost per project, trended.
 
-**Dollar modeling** (high confidence, modest effort). Token counts weighted by
-per-model prices — cache writes cost more than reads by an order of magnitude, output
-costs more than input by another — so the flamegraph can render *dollars* instead of
-tokens. Then what-ifs: what would this month have cost with 5m instead of 1h cache
-TTL, or with Sonnet running the subagents?
+**Dollar modeling** (high). The cost vector priced per model, so every view can
+render dollars; then what-ifs — this month on 5m instead of 1h TTL, subagents on a
+cheaper model.
 
-**The optimization advisor** (medium confidence — the analysis is real work, but the
-findings write themselves once attribution exists). The report stops being a chart
-and starts being a punch list: "your top overhead is X, here is the config change."
-Bloated tool outputs worth truncating. Hooks whose injected context outweighs their
-value. A CLAUDE.md or skill listing that costs more per session than it earns.
-Sessions that should have been subagents, and subagents that cost more than they
-saved (delegation ROI is directly computable: tokens the subagent burned vs. context
-the parent avoided).
+**Activity analytics** (high once classification lands). The percentages, the
+multipliers, the ROI questions above — answered over the whole corpus, not
+anecdotally.
+
+**The optimization advisor** (medium — real analysis work, but the findings write
+themselves once attribution exists). The report stops being a chart and becomes a
+punch list: the tool output worth truncating, the hook whose injected context
+outweighs its value, the CLAUDE.md that costs more per session than it earns, the
+session that should have been a subagent — and the subagent that cost more than it
+saved.
 
 **The longitudinal instrument** (speculative — depends on living with the tool).
-Trends over weeks: is overhead growing? A/B across config changes: did removing that
-plugin actually reduce startup cost? Model-mix analysis across the fleet of sessions.
-A watch mode that profiles the session you are *in*; maybe a statusline hook that
-shows the meter running. At this altitude cc-miser stops being a retrospective and
-becomes part of the feedback loop.
+Trends across weeks; A/B across config changes; the delivery join (cost per merged
+PR by phase); watch mode profiling the session you are in; maybe a statusline
+meter. At this altitude cc-miser stops being a retrospective and joins the feedback
+loop.
 
-The honest ceiling: cc-miser can *measure* anything the transcripts record, and the
-transcripts record almost everything. What it cannot do is see spend that never
-reaches disk (other machines, claude.ai sessions) or attribute with exactness below
-the API-call level — the chars/4 estimates are good enough to rank causes, not to
-audit them. The `unattributed` remainder is the permanent, visible reminder of that
-line.
+The honest ceiling: cc-miser can measure anything the transcripts record, and they
+record almost everything — but it cannot see spend that never reaches this disk
+(other machines, claude.ai), it cannot attribute exactly below the API-call level
+(chars/4 ranks causes; it does not audit them), and activity labels are
+classifications, not facts. The `unattributed` remainder and the coverage
+statement are the permanent, visible reminders of those lines.
 
 ## Open questions
 
-- **What is the right default weight?** Raw tokens, "new tokens" (input +
-  cache-write + output, excluding cheap cache reads), or dollars? Likely: tokens
-  first, dollars as a toggle once pricing lands.
-- **Format drift.** All current sessions are CC 2.1.x. Older or future vintages will
-  differ; the parse checkpoint's unknown-type counter is the early-warning system,
-  but somebody has to look at it.
-- **Where does "advisor" stop?** Detecting a bloated hook is analysis; editing your
+- **Default weight:** raw tokens, "new tokens" (input + cache-write + output,
+  excluding cheap reads), or dollars? Likely tokens first, dollars as a toggle
+  once pricing lands.
+- **Format drift:** all current sessions are CC 2.1.x. The parse checkpoint's
+  unknown-type counter is the early-warning system, but someone has to look at it.
+- **Taxonomy fit:** the draft leaves will meet reality when the classifier runs;
+  expect one revision after the first full-corpus pass, and version it.
+- **Where "advisor" stops:** detecting a bloated hook is analysis; editing
   settings is a different tool. Current position: cc-miser reports, you act.
 
 ## Ground rules
 
-The architecture commitments, stated once: file I/O only at the edges, pure core;
-one parse checkpoint, typed records everywhere downstream; one span tree as the
-single source of truth with every renderer a pure function of it; exact numbers
-never adjusted by estimates; failures and unknowns surfaced, never swallowed. Lean
-on existing viewers and libraries (Perfetto, d3-flame-graph) rather than building
-chart engines — the value here is in the attribution, not the pixels.
+File I/O and LLM calls only at the edges, pure core. One parse checkpoint, typed
+records everywhere downstream. One span tree as the single source of truth, every
+renderer a pure function of it. Exact numbers never adjusted by estimates;
+estimates always labeled, with the remainder explicit. Failures and unknowns
+surfaced, never swallowed. Classification verdicts cached, versioned, and carrying
+provenance. Lean on existing viewers (Perfetto, d3-flame-graph, OTLP backends)
+rather than building chart engines — the value is in the attribution, not the
+pixels.
