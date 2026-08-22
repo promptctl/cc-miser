@@ -1,3 +1,8 @@
 node_modules/
 *.html
 dist/
+
+# Chrome profiles are managed by `crom`, never checked in.
+examples/**/.chrome-profile/
+# Diagnostic screenshots from a failed verify run are transient.
+examples/**/screenshots/FAILED-*.png
