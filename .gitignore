@@ -1,22 +1,21 @@
 node_modules/
 dist/
 
-# Generated artifacts, named one by one rather than as a bare `*.html`.
+# Generated report output. `bun run report` writes index.html and corpus.json here,
+# together a few MB that regenerate in seconds from the transcripts on the machine.
 #
-# The bare pattern silently ignored every HTML file anywhere in the repo, including
-# ones nobody meant to ignore — `examples/report/index.html` was being dropped by it
-# without anyone deciding that. A rule that swallows files you never named is the git
-# spelling of `2>/dev/null`. [LAW:no-silent-failure]
+# Ignoring a whole DIRECTORY rather than a list of filenames is deliberate, and it is
+# not the same mistake as the bare `*.html` this file used to carry. That pattern
+# reached across the entire repo and silently dropped files nobody had decided to
+# ignore — the git spelling of `2>/dev/null`. [LAW:no-silent-failure] This rule names
+# one path whose entire reason to exist is generated output, so nothing hand-authored
+# can wander into its blast radius.
 #
-# Both files below regenerate in about a second from checked-in inputs, and both are
-# large enough (300 KB and 1.3 MB) that committing them would dwarf the source they
-# come from. The screenshots in examples/hand-trace/screenshots/ are the durable
-# record; the HTML is not.
-examples/hand-trace/flamegraph.html
-examples/report/index.html
-examples/report/corpus.json
+# It also means the output can never be committed by accident, which matters here: a
+# corpus.json is a verbatim record of one machine's real sessions.
+out/
 
-# Chrome profiles are managed by `crom`, never checked in.
-examples/**/.chrome-profile/
-# Diagnostic screenshots from a failed verify run are transient.
-examples/**/screenshots/FAILED-*.png
+# Machine-local runtime state, never checked in. This lock carries a session UUID, a
+# pid and a boot timestamp — facts about one running process on one laptop, with no
+# meaning in any other clone. It was tracked until miser-portability-adi.1.
+.claude/scheduled_tasks.lock

@@ -21,7 +21,9 @@ export interface SubagentSource {
 }
 
 export interface SessionSource {
-  /** The project directory's slug, e.g. `-Users-you-code-cc-miser`. */
+  /** The project directory's slug: the project's absolute path with each `/` flattened
+   * to `-`, e.g. `-Users-you-code-cc-miser`. Rendered through `projectLabel` rather
+   * than shown raw — it is a whole filesystem path, not a name. */
   project: string;
   sessionId: string;
   /** The main conversation's JSONL. */

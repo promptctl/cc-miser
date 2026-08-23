@@ -5,9 +5,9 @@
   "private": true,
   "scripts": {
     "report": "bun run src/report/generate.ts",
-    "oracle": "bun run examples/hand-trace/trace.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "privacy": "bash scripts/privacy-scan.sh"
   },
   "devDependencies": {
     "@types/bun": "latest"
