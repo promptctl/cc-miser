@@ -16,11 +16,52 @@
 // whole model.
 
 import type { Basis, Cost, Projection, Size, Usage } from '../tokens.ts';
+
+/** Re-exported as a VALUE, not just a type, so the renderer keeps needing exactly one
+ * import to speak the whole model.
+ *
+ * It is the one constructor a renderer legitimately calls: `PriceTotals` carries `usd`
+ * as a bare number because that is the type the arithmetic is done in, and this is what
+ * stamps the projection onto it at the moment it becomes something a person reads. The
+ * alternative — a `totalUsd: Cost` sitting beside `pricing.usd` — would be two
+ * representations of one dollar figure, free to drift. [LAW:one-source-of-truth] */
+export { usdCost } from '../tokens.ts';
 import type { Spawn } from '../lineage.ts';
 import type { Activity, Label, Tier } from '../activity.ts';
 import type { OutputTotals } from '../output.ts';
+import type { PriceTotals, TokenizerFit } from '../models.ts';
 
-export type { Basis, Cost, Projection, Size, Usage, Spawn, Activity, Label, Tier, OutputTotals };
+export type {
+  Basis,
+  Cost,
+  Projection,
+  Size,
+  Usage,
+  Spawn,
+  Activity,
+  Label,
+  Tier,
+  OutputTotals,
+  PriceTotals,
+  TokenizerFit,
+};
+
+/** What the report was able to calibrate and price, stated as data rather than left for
+ * a reader to infer from an absence.
+ *
+ * [LAW:one-source-of-truth] The per-model coefficients reach the page from here — the
+ * same fits the arithmetic used, not a transcription of them into prose. A table of
+ * coefficients a human retypes into a caption is a second copy with a schedule. */
+export interface Calibration {
+  /** One row per model the corpus calibrated, with the held-out error that says how far
+   * to trust it. */
+  rows: readonly (TokenizerFit & { model: string })[];
+  /** Every model id the calibration corpus contained, including the ones that produced
+   * no row — the denominator for "what share of models did we manage to calibrate". */
+  seen: readonly string[];
+  /** Where the price catalogue's numbers came from and as of when. */
+  priceSource: string;
+}
 
 export interface CallRow {
   index: number;
@@ -150,7 +191,13 @@ export interface SessionReport {
 
   usage: Usage;
   total: Cost;
-  totalUsd: Cost;
+  /** Dollars AND the spend no rate card covered.
+   *
+   * [LAW:types-are-the-program] There is deliberately no bare `totalUsd` beside this. A
+   * renderer that wants the money has to hold the gap in the same hand, so a page can
+   * never show a confident dollar figure for a corpus half of whose models it could not
+   * price. The `usd` Projection tag is applied where the number reaches the page. */
+  pricing: PriceTotals;
 
   calls: readonly CallRow[];
   epochs: readonly Epoch[];
@@ -177,7 +224,9 @@ export interface CorpusReport {
   /** Ledgers computed across every session, not per-session. */
   ledgers: readonly Ledger[];
   total: Cost;
-  totalUsd: Cost;
+  pricing: PriceTotals;
+  /** What the corpus taught the estimator, and what the rates rest on. */
+  calibration: Calibration;
   coverage: Coverage;
   /** Output split across every session, so the reasoning share is a corpus fact rather
    * than an anecdote from whichever session is on screen. */

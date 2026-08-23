@@ -13,15 +13,19 @@
 // that bill — a forensic statement of account on bone paper, hairline-ruled, set in
 // tabular figures, with the waste in accountant's red.
 
+import { usdCost } from './model.ts';
 import type {
   Activity,
   ArenaBasis,
+  Calibration,
   CorpusReport,
   Cost,
   Coverage,
   Finding,
   FlameNode,
   Ledger,
+  OutputTotals,
+  PriceTotals,
   SessionReport,
   Stratum,
 } from './model.ts';
@@ -68,6 +72,14 @@ const projectLabel = (slug: string): string => slug.replace(/^-(?:Users|home)-[^
 
 const money = (c: Cost): string =>
   c.projection === 'usd' ? `$${c.value.toFixed(2)}` : n(c.value);
+
+/** A dollar total on its way to the page.
+ *
+ * The projection tag is stamped here, at the last moment, because `PriceTotals` carries
+ * `usd` as the bare number the arithmetic is done in. Routing every dollar figure
+ * through this one helper keeps the model's rule intact — nothing prints a bare number —
+ * without a second copy of the total living in the model to satisfy it. */
+const dollars = (usd: number): string => money(usdCost(usd));
 
 const unit = (c: Cost): string =>
   c.projection === 'usd' ? 'USD' : c.projection === 'raw-tokens' ? 'tokens' : 'tok-eq';
@@ -330,6 +342,88 @@ function arenaBasisCheck(b: ArenaBasis): string {
   </div>`;
 }
 
+/** What the dollar figure covers, and what it does not.
+ *
+ * Sits with the other trust checks because it answers their question on the money axis:
+ * coverage says how the LABELS were decided, the arena check says how the SIZES were,
+ * and this says what the PRICE rests on. Every figure here is stated at zero as well —
+ * "everything on this page was priced" is a claim a reader can hold the page to, while
+ * silence is also what an unpriced corpus looks like. [LAW:no-silent-failure]
+ *
+ * The two gaps are separate rows because they are separate failures with separate fixes:
+ * a model with no published rate needs a rate card, a model with no measured tokenizer
+ * needs more of its calls in the corpus. Collapsing them into one "unknown" percentage
+ * would tell a reader something is wrong and nothing about which. */
+function pricingCheck(p: PriceTotals, out: OutputTotals): string {
+  const total = p.pricedSpend + p.unpricedSpend;
+  const priced = total === 0 ? 1 : p.pricedSpend / total;
+  const rows = [
+    p.unpriced.length === 0
+      ? `<p>Every one of the ${n(p.calls)} calls ran a model with a published rate, so
+         ${dollars(p.usd)} is the whole bill rather than a floor.</p>`
+      : `<p><strong>${dollars(p.usd)} covers ${pct(priced)} of spend.</strong> The remaining
+         ${n(p.unpricedSpend)} token-equivalents across ${n(p.unpricedCalls)} calls ran
+         ${p.unpriced.map((u) => `<code>${esc(u.model)}</code>`).join(', ')}, for which this
+         report holds no rate. They are priced at nothing rather than at some other model's
+         rate, so the total above accounts for the priced share and infers nothing for the
+         rest.</p>`,
+    out.uncalibratedModels.length === 0
+      ? `<p>Every output token was split against a tokenizer measured for its own model.</p>`
+      : `<p><strong>${pct(out.uncalibrated / Math.max(1, out.total))} of output tokens could not
+         be split.</strong> ${n(out.uncalibrated)} tokens across ${n(out.uncalibratedCalls)} calls
+         ran ${out.uncalibratedModels.map((m) => `<code>${esc(m)}</code>`).join(', ')}, and this
+         corpus holds too few calls from those models that emitted no thinking block — the only
+         free source of exact tokenizer calibration. Their output is counted in the exact total
+         and attributed to neither reasoning nor visible text.</p>`,
+  ];
+  // The colour follows what the gap COSTS, not whether one exists. This corpus has 12
+  // calls on a model with no rate card whose usage vector is all zeros, and painting that
+  // red would spend the reader's alarm on nothing and teach them to ignore the border.
+  // The numbers are stated in full either way; only the emphasis moves.
+  const material = p.unpricedSpend / Math.max(1, total) > 0.005 ||
+    out.uncalibrated / Math.max(1, out.total) > 0.005;
+  return `<div class="check wide ${material ? 'warn' : 'note'}">
+    <b>What the money rests on</b>
+    ${rows.join('')}
+  </div>`;
+}
+
+/** The measured tokenizer, per model, with the error bar that says how far to trust it.
+ *
+ * These are the coefficients the arithmetic on this page actually used, read out of the
+ * fit rather than transcribed — the estimator publishing its own calibration is the only
+ * version of this table that cannot go stale. [LAW:one-source-of-truth] */
+function calibrationTable(cal: Calibration): string {
+  const rows = cal.rows
+    .map(
+      (r) => `<tr>
+        <th scope="row"><code>${esc(r.model)}</code></th>
+        <td class="num">${r.charsPerToken.toFixed(2)}</td>
+        <td class="num">${r.tokensPerBlock.toFixed(1)}</td>
+        <td class="num">${n(r.points)}</td>
+        <td class="num ${Math.abs(r.heldOutError) > 0.05 ? 'below' : ''}">${(r.heldOutError * 100).toFixed(1)}%</td>
+      </tr>`,
+    )
+    .join('');
+  const uncalibrated = cal.seen.filter((m) => !cal.rows.some((r) => r.model === m));
+  return `<div class="check note wide">
+    <b>How the output split was calibrated</b>
+    <p>A call that emitted no thinking block was billed <code>output_tokens</code> for exactly
+      the blocks a reader can see, so every such call is a free, exact measurement of that
+      model's tokenizer. These coefficients are fit per model id over every transcript on this
+      machine, and scored on transcripts the fit never saw.</p>
+    <table class="calib"><thead><tr>
+      <th>model</th><th class="num">chars/token</th><th class="num">tokens/block</th>
+      <th class="num">calibration calls</th><th class="num">held-out error</th>
+    </tr></thead><tbody>${rows}</tbody></table>
+    <p>${
+      uncalibrated.length === 0
+        ? 'Every model id in the corpus produced a usable fit.'
+        : `No usable fit for ${uncalibrated.map((m) => `<code>${esc(m)}</code>`).join(', ')} — too few calls that emitted no thinking block. Output from those models is counted but not split.`
+    } Dollar rates are a separate matter and are not measured from any corpus: ${esc(cal.priceSource)}</p>
+  </div>`;
+}
+
 /** The corpus view.
  *
  * PROJECT.md's founding question — how much goes to reviewing versus making changes —
@@ -362,14 +456,14 @@ function corpusSection(c: CorpusReport): string {
       <div class="mh-right">
         <div class="total">${n(c.total.value)}</div>
         <div class="total-unit">token-equivalents<br><span>input×1 + cache-write×1.25 + cache-read×0.1, plus output</span></div>
-        <div class="total-usd">${money(c.totalUsd)}</div>
+        <div class="total-usd">${dollars(c.pricing.usd)}</div>
       </div>
     </header>
 
     <div class="strip">
       <div><b>${c.sessions.length}</b><span>sessions</span></div>
       <div><b>${n(calls)}</b><span>API calls</span></div>
-      <div><b>${money(c.totalUsd)}</b><span>total</span></div>
+      <div><b>${dollars(c.pricing.usd)}</b><span>total</span></div>
       <div><b>${n(c.total.value / Math.max(1, calls))}</b><span>tok-eq per call</span></div>
       <div><b>${pct(c.output.reasoning / Math.max(1, c.output.total))}</b><span>output was reasoning</span></div>
       <div><b>${pct(c.coverage.unclassified)}</b><span>unclassified</span></div>
@@ -395,6 +489,10 @@ function corpusSection(c: CorpusReport): string {
     <section class="panel">
       <h3>How much to trust this page</h3>
       ${coverageBar(c.coverage)}
+      <div class="checks">
+        ${pricingCheck(c.pricing, c.output)}
+        ${calibrationTable(c.calibration)}
+      </div>
     </section>
   </article>`;
 }
@@ -413,7 +511,7 @@ function sessionSection(s: SessionReport, idx: number): string {
       <div class="mh-right">
         <div class="total">${n(s.total.value)}</div>
         <div class="total-unit">token-equivalents<br><span>input×1 + cache-write×1.25 + cache-read×0.1, plus output</span></div>
-        <div class="total-usd">${money(s.totalUsd)}</div>
+        <div class="total-usd">${dollars(s.pricing.usd)}</div>
       </div>
     </header>
 
@@ -441,6 +539,7 @@ function sessionSection(s: SessionReport, idx: number): string {
       <h3>How much to trust this page</h3>
       ${coverageBar(s.coverage)}
       <div class="checks">
+        ${pricingCheck(s.pricing, s.output)}
         <div class="check ${exact ? 'ok' : 'warn'}">
           <b>${exact ? 'Residency reconstruction is exact' : 'Residency reconstruction does not reconcile'}</b>
           <p>Two independent routes to total cache-read — the API's own reported figure
@@ -468,7 +567,7 @@ export function renderCorpus(c: CorpusReport): string {
     .map(
       (s, i) => `<li><button data-go="${i}">
         <span class="ix-proj">${esc(projectLabel(s.project))}</span>
-        <span class="ix-cost">${money(s.totalUsd)}</span>
+        <span class="ix-cost">${dollars(s.pricing.usd)}</span>
         <span class="ix-syn">${esc(s.synopsis)}</span>
         <span class="ix-sub">${esc(s.sessionId.slice(0, 8))} · ${s.calls.length} calls · ${dur(s.endedAt - s.startedAt)}</span>
       </button></li>`,
@@ -638,6 +737,15 @@ body::before{
 .check code{font-family:var(--mono); font-size:11.5px}
 .check ul{margin:4px 0 0; padding-left:16px}
 .check li{margin:2px 0}
+.check p{margin:4px 0 0}
+/* The calibration table is a rate card, not a sidebar note: it needs the full width to
+   stay readable, so it opts out of the auto-fit column grid the other checks share. */
+.check.wide{grid-column:1/-1}
+table.calib{width:100%; border-collapse:collapse; margin:8px 0; font-family:var(--mono); font-size:11.5px}
+table.calib th,table.calib td{padding:3px 10px 3px 0; text-align:left; border-bottom:1px solid var(--rule); font-weight:400}
+table.calib thead th{color:var(--ink-2); border-bottom-width:2px}
+table.calib .num{text-align:right; white-space:nowrap}
+table.calib .below{color:var(--red)}
 @media (max-width:1000px){
   .wrap{grid-template-columns:1fr} .rail{position:static;height:auto}
   .ledgers,.checks{grid-template-columns:1fr} .masthead{flex-direction:column;align-items:flex-start}
@@ -650,7 +758,7 @@ body::before{
       <h1>cc&#8202;·&#8202;miser</h1>
       <div class="tag">Itemized bill, finally read</div>
       <div class="totals">
-        <b>${money(c.totalUsd)}</b>
+        <b>${dollars(c.pricing.usd)}</b>
         <span>${c.sessions.length} sessions · ${n(c.total.value)} tok-eq</span>
       </div>
     </div>

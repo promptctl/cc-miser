@@ -64,52 +64,26 @@ export const inputEquivalents = (u: Usage): number =>
 /** Everything a call cost, input side plus output. The figure the ledgers rank by. */
 export const spend = (u: Usage): number => inputEquivalents(u) + u.output;
 
-// Rates for claude-opus-4-8, the only model in the sessions measured so far. Stated
-// as named rates rather than folded into the arithmetic so the assumption stays
-// visible; miser-pricing-afc replaces this with a per-model table.
-export const USD_PER_INPUT_MTOK = 5;
-export const USD_PER_OUTPUT_MTOK = 25;
-
-export const dollars = (u: Usage): number =>
-  (inputEquivalents(u) * USD_PER_INPUT_MTOK + u.output * USD_PER_OUTPUT_MTOK) / 1_000_000;
+// WHERE THE DOLLARS AND THE OUTPUT TOKENIZER WENT. Both used to live here as global
+// constants: `USD_PER_INPUT_MTOK`/`USD_PER_OUTPUT_MTOK` measured on the one model this
+// laptop happened to run, and `OUTPUT_CHARS_PER_TOKEN`/`OUTPUT_TOKENS_PER_BLOCK` fit
+// with every model POOLED. Both are model-dependent facts, and a global is the claim
+// that they are not. Pooling was the more expensive lie: refit per model on corrected
+// data, the 4.6 family tokenizes at ~3.9 chars/token against ~2.6 for the 5 family and
+// Opus 4.8, so the pooled constant scored +30% and +50% held out on those two models.
+// Both now live in `models.ts`, keyed by model id. [LAW:one-source-of-truth]
 
 /** chars→tokens heuristic for English/code (~4 chars per token). Attribution
  * granularity, not billing accuracy.
  *
- * Calibrated for INPUT-side arrivals — tool results, user text, attachments — and
- * wrong by a factor of 1.6 on assistant output, which is denser. Use
- * `visibleOutputTokens` there. (Whether 4 is right for the input side is itself
- * unmeasured; miser-pipeline-sll.3 owns that, and the method is written down on
- * miser-report-z52.3.) */
+ * THE ONE SURVIVING GLOBAL CHARACTER CONSTANT, and it is a different constant from the
+ * output one that just left: this sizes INPUT-side arrivals — tool results, user text,
+ * attachments — which no model produced and which therefore have no model id to key on.
+ * It also has no free calibration source the way output does, so it needs a method of
+ * its own rather than a table row. miser-pipeline-sll.3 owns that; the method is written
+ * down on miser-report-z52.3. Until then, 4 is unmeasured and is labelled as an estimate
+ * wherever it reaches a page. */
 export const estimateTokens = (chars: number): number => Math.round(chars / 4);
-
-// How assistant OUTPUT tokenizes, measured rather than assumed.
-//
-// A call that emitted no thinking block has `output_tokens` exactly equal to the token
-// count of its visible blocks — so every such call is a free, exact calibration point,
-// and there are 14,564 of them in the corpus. Fitting
-// `output = chars/CHARS_PER_TOKEN + blocks*TOKENS_PER_BLOCK` on half of them and
-// scoring the other half gives -1.19% aggregate error, against -47.5% for chars/4:
-// assistant output is dense code, JSON and markdown, and chars/4 under-counts it by
-// nearly half. The per-block term is real — id, name and JSON scaffolding cost tokens
-// no character count sees.
-//
-// REFIT after the request-group usage bug (see `completeUsage` in calls.ts). The first
-// fit read a partial `output_tokens` on 15% of calls, which taught it that output was
-// cheaper per character than it is; on corrected data those constants score -3.20%.
-// A calibration is only ever as true as the measurement it was fit against, so this
-// pair is stated with the fit that produced it and must be refit if that changes.
-//
-// [LAW:one-type-per-behavior] One character coefficient, not one for prose and one for
-// tool_use JSON. The three-parameter fit separated them by less than its own error bar
-// and scored no better held out.
-export const OUTPUT_CHARS_PER_TOKEN = 2.585;
-export const OUTPUT_TOKENS_PER_BLOCK = 50.16;
-
-/** Estimated tokens for the VISIBLE part of a call's output: its text and tool_use
- * blocks. Never the thinking block, whose text the transcript writer strips. */
-export const visibleOutputTokens = (chars: number, blocks: number): number =>
-  Math.round(chars / OUTPUT_CHARS_PER_TOKEN + blocks * OUTPUT_TOKENS_PER_BLOCK);
 
 /** How a token count was arrived at.
  *

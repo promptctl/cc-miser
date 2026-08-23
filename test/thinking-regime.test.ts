@@ -13,9 +13,15 @@ import { buildConversation } from '../src/calls.ts';
 import { parseTranscript } from '../src/records.ts';
 import { splitOutput, totalOutput } from '../src/output.ts';
 import { findEpochs, trueCost } from '../src/residency.ts';
-import { REASONING, twoCallSession } from './fixtures.ts';
+import { fixtureModels, REASONING, twoCallSession } from './fixtures.ts';
 
 const convOf = (text: string) => buildConversation(parseTranscript(text).lines);
+
+// Coefficients chosen, not fit: the subject here is how output DIVIDES once a tokenizer
+// exists, and every assertion below holds for any coefficients — `remainder` is defined
+// as `total - visible` whatever `visible` comes out to. Pinning them keeps these tests
+// from depending on whichever corpus the machine running them happens to hold.
+const models = fixtureModels({ 'claude-opus-5': { charsPerToken: 2.5, tokensPerBlock: 50 } });
 
 const stripping = convOf(twoCallSession(''));
 const retaining = convOf(twoCallSession(REASONING));
@@ -77,7 +83,9 @@ describe('assistant output is sized exactly, not estimated', () => {
 
 describe('the output split names its remainder honestly', () => {
   test('a call with a thinking block reports reasoning', () => {
-    const s = splitOutput(stripping.calls[0]!);
+    const s = splitOutput(stripping.calls[0]!, models);
+    expect(s.kind).toBe('split');
+    if (s.kind !== 'split') throw new Error('unreachable: the fixture model is calibrated');
     expect(s.total).toBe(900);
     expect(s.remainder.kind).toBe('reasoning');
     expect(s.remainder.tokens).toBe(900 - s.visible);
@@ -89,20 +97,28 @@ describe('the output split names its remainder honestly', () => {
     const noThink = convOf(
       twoCallSession('').replace(/\{"type":"thinking"[^}]*\}/g, '{"type":"text","text":""}'),
     );
-    const s = splitOutput(noThink.calls[0]!);
+    const s = splitOutput(noThink.calls[0]!, models);
+    if (s.kind !== 'split') throw new Error('unreachable: the fixture model is calibrated');
     expect(s.remainder.kind).toBe('estimator-error');
-    expect(totalOutput(noThink.calls).reasoning).toBe(0);
-    expect(totalOutput(noThink.calls).callsWithReasoning).toBe(0);
+    expect(totalOutput(noThink.calls, models).reasoning).toBe(0);
+    expect(totalOutput(noThink.calls, models).callsWithReasoning).toBe(0);
   });
 
   test('the split is regime-invariant: visible and reasoning do not move', () => {
-    expect(totalOutput(retaining.calls)).toEqual(totalOutput(stripping.calls));
+    expect(totalOutput(retaining.calls, models)).toEqual(totalOutput(stripping.calls, models));
   });
 
   test('exact totals are never adjusted by the estimate', () => {
     // PROJECT.md's invariant. `total` comes off usage and must equal it whatever the
     // visible estimate does.
-    const t = totalOutput(retaining.calls);
+    const t = totalOutput(retaining.calls, models);
     expect(t.total).toBe(retaining.calls.reduce((a, c) => a + c.usage.output, 0));
+  });
+
+  test('the four figures close on the exact total, uncalibrated included', () => {
+    // The ledger's closure property, now that a fourth bucket exists. If an uncalibrated
+    // call's output were dropped rather than bucketed, this is what would catch it.
+    const t = totalOutput(retaining.calls, models);
+    expect(t.visible + t.reasoning + t.estimatorError + t.uncalibrated).toBe(t.total);
   });
 });

@@ -13,15 +13,19 @@ import { allCalls, isSpawned, isToolSpan, rollup, rollupWhere, type Span } from 
 import { depthOf } from '../lineage.ts';
 import {
   CACHE_READ_MULTIPLE,
-  OUTPUT_CHARS_PER_TOKEN,
   WRITE_MULTIPLE,
-  dollars,
   eqCost,
   inputEquivalents,
   spend,
-  usdCost,
   type Usage,
 } from '../tokens.ts';
+import {
+  canonicalModelId,
+  priceCalls,
+  tokenizerFor,
+  type ModelTable,
+  type PriceTotals,
+} from '../models.ts';
 import { totalOutput, type OutputTotals } from '../output.ts';
 import type { Tier } from '../activity.ts';
 import type {
@@ -39,7 +43,7 @@ import type {
 const fmt = (n: number): string => Math.round(n).toLocaleString();
 const pct = (n: number, d: number): string => (d === 0 ? '0.0' : ((n / d) * 100).toFixed(1));
 
-export function projectSession(a: AnalyzedSession): SessionReport {
+export function projectSession(a: AnalyzedSession, models: ModelTable): SessionReport {
   const callSpans = allCalls(a.tree);
   const exact = rollup(a.tree);
   // Every call in the session, spawned ones included, so the output split covers the
@@ -48,10 +52,10 @@ export function projectSession(a: AnalyzedSession): SessionReport {
   // where blocks live. [LAW:one-source-of-truth] The two populations must match or the
   // reasoning share would be a fraction of a different denominator than it is shown
   // against.
-  const output = totalOutput([
-    ...a.conversation.calls,
-    ...a.forest.placed.flatMap((p) => p.conversation.calls),
-  ]);
+  const output = totalOutput(
+    [...a.conversation.calls, ...a.forest.placed.flatMap((p) => p.conversation.calls)],
+    models,
+  );
   // [LAW:one-source-of-truth] Both figures come from ONE traversal with different
   // predicates, never from subtracting one from the other.
   const spawnedOnly = rollupWhere(a.tree, isSpawned);
@@ -98,6 +102,10 @@ export function projectSession(a: AnalyzedSession): SessionReport {
     };
   };
 
+  // Computed once and shared by the header figure and the findings, so the punch list
+  // and the number at the top of the page cannot disagree. [LAW:one-source-of-truth]
+  const pricing = priceCalls(calls);
+
   const agentShare = (rs: CallRow[]): string => {
     const tot = rs.reduce((acc, r) => acc + spend(r.usage), 0);
     const ag = rs.filter((r) => r.depth > 0).reduce((acc, r) => acc + spend(r.usage), 0);
@@ -142,15 +150,29 @@ export function projectSession(a: AnalyzedSession): SessionReport {
     // Keys stay short. Every row here is an estimate and the lede says so once, so
     // tagging each one "(estimated)" restated it at the same altitude while squeezing
     // the bar column to nothing — the ledger rendered with no bars at all.
+    // FOUR rows now, and the fourth is what keeps the first three honest. An
+    // uncalibrated call's output belongs to no estimate at all — there is no tokenizer
+    // for its model — so it cannot be folded into any of the others without inventing an
+    // attribution. Given its own row, the ledger still closes on the exact total; folded
+    // away, the page would have shown three rows summing to less than the figure above
+    // them and no explanation of the difference. Stated at zero for the same reason the
+    // others are.
     const rows: Array<[string, number, string]> = [
       ['reasoning', o.reasoning, `${o.callsWithReasoning} of ${o.calls} calls thought`],
       ['visible text and tool calls', o.visible, 'what a reader can see'],
       ['estimator error', o.estimatorError, 'where the true answer is 0'],
+      [
+        'uncalibrated',
+        o.uncalibrated,
+        o.uncalibratedCalls === 0
+          ? 'every model was calibrated'
+          : `${o.uncalibratedCalls} calls on ${o.uncalibratedModels.join(', ')}`,
+      ],
     ];
     return {
       id: 'output',
       title: 'What the output tokens bought',
-      lede: `${fmt(o.total)} output tokens is an EXACT figure, and the three rows below close on it exactly. The split is not exact: reasoning is whatever the visible blocks fail to explain, so it carries the estimator's error, and the third row is that error measured where the true answer is known to be zero.`,
+      lede: `${fmt(o.total)} output tokens is an EXACT figure, and the four rows below close on it exactly. The split is not exact: reasoning is whatever the visible blocks fail to explain, so it carries the estimator's error, the third row is that error measured where the true answer is known to be zero, and the fourth is output from models this corpus could not calibrate at all — counted, but attributed to neither.`,
       rows: rows.map(([key, v, note]) => ({
         key,
         cost: eqCost(v),
@@ -199,10 +221,21 @@ export function projectSession(a: AnalyzedSession): SessionReport {
     project: a.source.project,
     startedAt: a.tree.tStart,
     endedAt: a.tree.tEnd,
-    model: a.conversation.calls[0]?.model ?? '(unknown)',
+    // EVERY model the session ran, not the first call's.
+    //
+    // A session is routinely multi-model: spawned agents run whatever their definition
+    // names, and this corpus has Haiku appearing only inside subagents. Naming the first
+    // call's model made the page state, as a fact about the session, something that was
+    // true of one call — and it is the exact assumption this ticket is here to remove,
+    // since the pricing beneath it is now per call.
+    model: [...new Set(calls.map((c) => canonicalModelId(c.model)))].sort().join(', '),
     usage: exact,
     total: eqCost(grandTotal),
-    totalUsd: usdCost(dollars(exact)),
+    // Priced per call at each model's own rate and each call's own instant, then summed
+    // — never the session's aggregate usage at one model's rate, which is what a single
+    // global rate pair forced and what made every multi-model session's dollar figure
+    // wrong. [LAW:one-source-of-truth]
+    pricing,
     calls,
     epochs: a.residency.epochs.map((e) => ({
       index: e.index,
@@ -239,7 +272,7 @@ export function projectSession(a: AnalyzedSession): SessionReport {
       toolLedger(),
       cacheLedger(),
     ],
-    findings: findingsFor(a, exact, spawnedOnly, grandTotal, output),
+    findings: findingsFor(a, exact, spawnedOnly, grandTotal, output, pricing, models, calls),
     strata: strataFor(a),
     flame: flameOf(a.tree),
     synopsis: synopsisFor(a, calls),
@@ -255,8 +288,24 @@ function findingsFor(
   spawnedOnly: Usage,
   grandTotal: number,
   output: OutputTotals,
+  pricing: PriceTotals,
+  models: ModelTable,
+  calls: readonly CallRow[],
 ): Finding[] {
   const findings: Finding[] = [];
+
+  // What the estimator was actually calibrated at, for the models this session ran —
+  // read out of the same fits the arithmetic used rather than restated from a constant.
+  // [LAW:one-source-of-truth]
+  const usedModels = [...new Set(calls.map((c) => canonicalModelId(c.model)))].sort();
+  const coefficients = usedModels
+    .map((m) => ({ m, fit: tokenizerFor(models, m) }))
+    .filter((x) => x.fit.found)
+    .map((x) =>
+      x.fit.found
+        ? `${x.m} at ${x.fit.value.charsPerToken.toFixed(2)} chars/token plus ${x.fit.value.tokensPerBlock.toFixed(0)} per block (${(x.fit.value.heldOutError * 100).toFixed(1)}% held-out error over ${fmt(x.fit.value.points)} calibration calls)`
+        : '',
+    );
 
   // Reasoning is the largest single thing the transcript does not show you, and until
   // this ticket it was the largest thing this report did not show you either. It is
@@ -268,10 +317,44 @@ function findingsFor(
       output.reasoning > 0
         ? `Reasoning was ${pct(output.reasoning, Math.max(1, output.total))}% of output tokens`
         : 'No reasoning tokens in this session',
-    detail: `${fmt(output.reasoning)} of ${fmt(output.total)} output tokens went to thinking the model did not show, across ${output.callsWithReasoning} of ${output.calls} calls. Billed as output at the full output rate, and — measured against exact prompt sizes — resident in the context window for the rest of its cache epoch, exactly like text you can read. The split is an ESTIMATE: output totals are exact, the visible part is reconstructed from characters at ${OUTPUT_CHARS_PER_TOKEN} chars per token, and reasoning is the difference. The same arithmetic on calls that did no thinking returns ${fmt(Math.abs(output.estimatorError))} tokens where the true answer is zero, which is the error bar.`,
+    detail: `${fmt(output.reasoning)} of ${fmt(output.total)} output tokens went to thinking the model did not show, across ${output.callsWithReasoning} of ${output.calls} calls. Billed as output at the full output rate, and — measured against exact prompt sizes — resident in the context window for the rest of its cache epoch, exactly like text you can read. The split is an ESTIMATE: output totals are exact, the visible part is reconstructed from characters using coefficients measured for each model separately — ${coefficients.length > 0 ? coefficients.join('; ') : 'none of this session’s models could be calibrated'} — and reasoning is the difference. The same arithmetic on calls that did no thinking returns ${fmt(Math.abs(output.estimatorError))} tokens where the true answer is zero, which is the error bar.`,
     cost: eqCost(output.reasoning),
     shareOfSession: output.reasoning / grandTotal,
     severity: output.reasoning / grandTotal > 0.05 ? 'high' : 'note',
+  });
+
+  // WHAT THE PAGE COULD NOT ACCOUNT FOR. Stated for every session, at zero as well as
+  // above it, for the same reason the reasoning row is: a figure that appears only when
+  // it is non-zero teaches a reader that its absence means "none" when it may mean
+  // "never checked". This is the visible half of the loud failure — an unrecognised
+  // model is quarantined into a named bucket here rather than silently priced at some
+  // other model's rates. [LAW:no-silent-failure]
+  const unpricedShare = pricing.unpricedSpend / Math.max(1, grandTotal);
+  const uncalibratedShare = output.uncalibrated / Math.max(1, output.total);
+  const gaps = [
+    ...(pricing.unpriced.length > 0
+      ? [
+          `Could not price ${fmt(pricing.unpricedSpend)} token-equivalents (${pct(pricing.unpricedSpend, grandTotal)}% of this session) across ${pricing.unpricedCalls} calls: ${pricing.unpriced.map((u) => u.why).join('; ')}. Those calls contribute nothing to the dollar figure, which is therefore a floor rather than a total.`,
+        ]
+      : []),
+    ...(output.uncalibratedModels.length > 0
+      ? [
+          `Could not split ${fmt(output.uncalibrated)} output tokens (${pct(output.uncalibrated, Math.max(1, output.total))}% of output) across ${output.uncalibratedCalls} calls on ${output.uncalibratedModels.join(', ')}: this corpus holds too few calls from those models that emitted no thinking block, which is the only free source of exact tokenizer calibration. Their output is counted but not attributed to reasoning or to visible text.`,
+        ]
+      : []),
+  ];
+  findings.push({
+    headline:
+      gaps.length === 0
+        ? 'Every model in this session was priced and calibrated'
+        : `${(Math.max(unpricedShare, uncalibratedShare) * 100).toFixed(1)}% of this session could not be priced or calibrated`,
+    detail:
+      gaps.length === 0
+        ? `All ${pricing.calls} calls ran models with a published rate and a measured tokenizer, so the dollar figure covers the whole session and every output token is attributed. Stated even at zero, because a gap that only appears when it exists cannot be distinguished from a gap nobody looked for.`
+        : gaps.join(' '),
+    cost: eqCost(pricing.unpricedSpend),
+    shareOfSession: unpricedShare,
+    severity: unpricedShare > 0.05 || uncalibratedShare > 0.05 ? 'high' : 'note',
   });
 
   for (const e of a.residency.epochs.slice(1)) {
