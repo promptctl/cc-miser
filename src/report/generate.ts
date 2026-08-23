@@ -8,13 +8,34 @@
 // consumer would call. An oracle that produces cannot check itself, so nothing on this
 // path is allowed to double as the verifier.
 //
-// NOTHING CURRENTLY CHECKS THESE FIGURES INDEPENDENTLY. Until miser-portability-adi.1
-// this comment named `examples/hand-trace/trace.ts` — a second implementation that
-// recomputed every number from raw JSONL and asserted agreement on 16 quantities. It
-// was deleted with the rest of the specimen because it was welded to one session UUID
-// on one machine. That check is a real loss, and miser-portability-adi.4 rebuilds it on
-// synthetic fixtures. Said here rather than left implied: a repo that quietly stops
-// verifying itself is worse off than one that never claimed to.
+// WHAT CHECKS THESE FIGURES, AND WHAT STILL DOES NOT. This comment used to say that
+// nothing did, after `examples/hand-trace/trace.ts` — a second implementation that
+// recomputed every number from raw JSONL — was deleted with the specimen it was welded
+// to. Since miser-pipeline-sll.5 the checks are:
+//
+//   test/spawned-conversations.test.ts  A synthetic session whose expected values were
+//     chosen BEFORE the transcript was generated: spawn resolution over both edge kinds,
+//     the fixpoint that links a grandchild through another subagent's transcript, the
+//     orphan reasons, depth against the harness's own claim, activity labels and their
+//     inheritance into spawned conversations, and cost rolled up per depth cohort.
+//   test/request-group.test.ts          The dedup rule and the completed-usage fold.
+//   test/thinking-regime.test.ts        Residency under a model that keeps its reasoning.
+//   test/model-table.test.ts            Per-model rates and tokenizer fits.
+//   test/portability.test.ts            Nothing machine-specific reaches the page.
+//   test/corpus-smoke.test.ts           The whole pipeline over a real corpus, asserting
+//     only what a corpus with no declared answers can support — that every session
+//     analyses, and that the tree holds every parsed call exactly once. Skipped, loudly,
+//     on a machine with no corpus.
+//
+// STILL UNVERIFIED: the attribution beneath a call (miser-pipeline-sll.3) and the
+// independent oracles over corpus-wide conservation (miser-pipeline-sll.6). The
+// estimator that turns characters into input-side tokens has no measured error bar at
+// all — `estimateTokens` says so at its definition.
+//
+// Said here rather than left implied: a repo that quietly stops verifying itself is
+// worse off than one that never claimed to. The reason this list is worth keeping true
+// is that the first run of the corpus scan above found 130 calls — 3.1M
+// input-equivalent tokens — that the span tree had been silently dropping.
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
