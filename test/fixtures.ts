@@ -46,6 +46,21 @@ export interface TurnSpec {
 
 const line = (o: unknown): string => JSON.stringify(o);
 
+/** A working directory on a machine nobody here has ever used: a Linux home layout
+ * rather than a macOS one, an OS user who is not this repo's author, and a leaf name
+ * containing the `-` that makes a flattened slug ambiguous.
+ *
+ * Claude Code files this session under `-home-jdoe-src-my-project`, from which
+ * `my-project` cannot be recovered — the same slug is what `src/my/project` would have
+ * produced. That ambiguity is the reason the pipeline reads `cwd`, so the fixture is
+ * built to exhibit it rather than to avoid it. */
+export const FOREIGN_CWD = '/home/jdoe/src/my-project';
+
+/** The directory name Claude Code derives from `FOREIGN_CWD`, transcribed from the
+ * observed flattening rule rather than recomputed here — a test that reimplemented the
+ * transform would be asserting against its own copy of it. */
+export const FOREIGN_SLUG = '-home-jdoe-src-my-project';
+
 /** Build a transcript from turn specs.
  *
  * [LAW:dataflow-not-control-flow] Regime is not a flag this function branches on — it
@@ -62,6 +77,10 @@ export function buildTranscript(
    * test what happens to an unrecognised one is to be able to write one.
    * [LAW:dataflow-not-control-flow] */
   model: string,
+  /** The `cwd` every line carries. Required rather than defaulted, because every
+   * transcript in the observed corpus carries one on every non-bookkeeping line — a
+   * fixture allowed to omit it would model a shape the format does not produce. */
+  cwd: string,
 ): string {
   const out: string[] = [];
   let uuid = 0;
@@ -74,6 +93,7 @@ export function buildTranscript(
       uuid: next(),
       timestamp: at(0),
       sessionId,
+      cwd,
       message: { role: 'user', content: 'do the thing' },
     }),
   );
@@ -110,6 +130,7 @@ export function buildTranscript(
           uuid: next(),
           timestamp: at(i * 2 + 1),
           sessionId,
+          cwd,
           requestId,
           message: { role: 'assistant', model, usage: usageAt(k), content: [b] },
         }),
@@ -123,6 +144,7 @@ export function buildTranscript(
           uuid: next(),
           timestamp: at(i * 2 + 2),
           sessionId,
+          cwd,
           message: {
             role: 'user',
             content: [{ type: 'tool_result', tool_use_id: t.tool.id, content: t.result }],
@@ -204,7 +226,11 @@ export const placeholderTailSession = (): string =>
 /** Two calls, one with reasoning and a tool call, one with reasoning and only text.
  * `thinking` is threaded in so the same session can be built under either regime, and
  * `model` so the same session can be built on a model the report has never heard of. */
-export const twoCallSession = (thinking: string, model = 'claude-opus-5'): string =>
+export const twoCallSession = (
+  thinking: string,
+  model = 'claude-opus-5',
+  cwd = FOREIGN_CWD,
+): string =>
   buildTranscript(
     '11111111-2222-3333-4444-555555555555',
     [
@@ -222,4 +248,5 @@ export const twoCallSession = (thinking: string, model = 'claude-opus-5'): strin
       },
     ],
     model,
+    cwd,
   );

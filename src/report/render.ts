@@ -26,9 +26,11 @@ import type {
   Ledger,
   OutputTotals,
   PriceTotals,
+  Selection,
   SessionReport,
   Stratum,
 } from './model.ts';
+import { workspaceKey } from '../workspace.ts';
 
 // ---------------------------------------------------------------------------
 // Formatting. A Cost renders WITH its projection; there is no path that prints a
@@ -41,34 +43,17 @@ const esc = (s: string): string =>
 const n = (v: number): string => Math.round(v).toLocaleString('en-US');
 const pct = (v: number): string => `${(v * 100).toFixed(1)}%`;
 
-/** A project slug with the home-directory prefix removed, so a heading names the
- * project rather than one machine's filesystem.
+/** What this page may honestly call itself, given what it actually rendered.
  *
- * A slug is an absolute path with every `/` flattened to `-`. This used to be a
- * `.replace()` of one literal prefix — the author's own `/Users/<name>/code/` — at two
- * call sites, a map drawn to fit exactly one username, one home layout and one parent
- * directory, which on any other machine matched nothing and rendered the author's raw
- * home path as a heading. [FRAMING:representation]
- *
- * What is matched here is STRUCTURE, not a remembered string: a home directory is
- * `/Users/<name>` or `/home/<name>`, so the first two segments go and everything below
- * home stays. `-Users-jdoe-src-someproject` -> `src-someproject`.
- *
- * A STOPGAP, and the honest reason why. The leaf name alone is NOT recoverable from a
- * slug: flattening is lossy, so `-Users-jdoe-src-my-project` is genuinely ambiguous
- * between `src/my/project` and `src/my-project`, and splitting on `-` turns this very
- * repo into "miser". Keeping the path below home sidesteps the ambiguity instead of
- * guessing at it. The real fix is to stop inverting a lossy function at all — the
- * transcripts carry the true `cwd` — and that belongs to miser-portability-adi.3,
- * which owns the parse layer this would have to reach into.
- *
- * On a home layout matching neither shape the slug renders unchanged, which is the
- * pre-existing behavior on such machines and is at least truthful rather than
- * confidently wrong.
- *
- * [LAW:one-source-of-truth] One definition for a rule that was two copies free to
- * drift. */
-const projectLabel = (slug: string): string => slug.replace(/^-(?:Users|home)-[^-]+-/, '');
+ * [FRAMING:representation] The map states its own scale. These words used to be
+ * hardcoded as "The whole account" / "Every session" above a filtered sample, which is
+ * the one kind of caption error nobody downstream can catch: a reader who has never seen
+ * the corpus has nothing to compare the claim against. Derived from `Selection` so the
+ * claim cannot outlive the filter that made it true. */
+const framing = (s: Selection): { eyebrow: string; title: string } =>
+  s.rendered === s.discovered
+    ? { eyebrow: 'The whole account', title: 'Every session' }
+    : { eyebrow: 'A sample of the account', title: `${n(s.rendered)} of ${n(s.discovered)} sessions` };
 
 const money = (c: Cost): string =>
   c.projection === 'usd' ? `$${c.value.toFixed(2)}` : n(c.value);
@@ -424,6 +409,20 @@ function calibrationTable(cal: Calibration): string {
   </div>`;
 }
 
+/** Which sessions the page was built from, and every filter that decided it.
+ *
+ * The wording is deliberately true at both ends of the range — "24 of the 24 sessions
+ * found" reads correctly when nothing was excluded — so the honest disclosure needs no
+ * conditional and cannot be left in a state that only one branch keeps true.
+ * [LAW:dataflow-not-control-flow] */
+const selectionNote = (s: Selection): string => `<section class="panel">
+      <h3>What this page covers</h3>
+      <p class="lede">${n(s.rendered)} of the ${n(s.discovered)} sessions found under the
+        projects directory. Every figure on this page describes those ${n(s.rendered)}
+        sessions and nothing beyond them.</p>
+      <ul class="criteria">${s.criteria.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
+    </section>`;
+
 /** The corpus view.
  *
  * PROJECT.md's founding question — how much goes to reviewing versus making changes —
@@ -444,13 +443,16 @@ function corpusSection(c: CorpusReport): string {
     from: Math.min(...c.sessions.map((s) => s.startedAt)),
     to: Math.max(...c.sessions.map((s) => s.endedAt)),
   };
-  const projects = new Set(c.sessions.map((s) => s.project)).size;
+  // Keyed on workspace identity rather than display name: two checkouts can share a leaf
+  // name, and counting by what the heading says would quietly merge them.
+  const projects = new Set(c.sessions.map((s) => workspaceKey(s.workspace))).size;
+  const { eyebrow, title } = framing(c.selection);
 
   return `<article class="session corpus on" data-panel="corpus">
     <header class="masthead">
       <div class="mh-left">
-        <div class="eyebrow">The whole account</div>
-        <h2>Every session</h2>
+        <div class="eyebrow">${esc(eyebrow)}</div>
+        <h2>${esc(title)}</h2>
         <div class="sub">${c.sessions.length} sessions · ${projects} projects · ${day(spanned.from)} — ${day(spanned.to)}</div>
       </div>
       <div class="mh-right">
@@ -486,6 +488,8 @@ function corpusSection(c: CorpusReport): string {
 
     <div class="ledgers">${c.ledgers.map(ledgerBlock).join('')}</div>
 
+    ${selectionNote(c.selection)}
+
     <section class="panel">
       <h3>How much to trust this page</h3>
       ${coverageBar(c.coverage)}
@@ -505,7 +509,7 @@ function sessionSection(s: SessionReport, idx: number): string {
     <header class="masthead">
       <div class="mh-left">
         <div class="eyebrow">Statement of account</div>
-        <h2>${esc(projectLabel(s.project))}</h2>
+        <h2>${esc(s.workspace.name)}</h2>
         <div class="sub">session ${esc(s.sessionId.slice(0, 8))} · ${esc(s.model)} · ${day(s.startedAt)} · ${dur(wall)} wall</div>
       </div>
       <div class="mh-right">
@@ -566,7 +570,7 @@ export function renderCorpus(c: CorpusReport): string {
   const index = c.sessions
     .map(
       (s, i) => `<li><button data-go="${i}">
-        <span class="ix-proj">${esc(projectLabel(s.project))}</span>
+        <span class="ix-proj">${esc(s.workspace.name)}</span>
         <span class="ix-cost">${dollars(s.pricing.usd)}</span>
         <span class="ix-syn">${esc(s.synopsis)}</span>
         <span class="ix-sub">${esc(s.sessionId.slice(0, 8))} · ${s.calls.length} calls · ${dur(s.endedAt - s.startedAt)}</span>
@@ -729,6 +733,8 @@ body::before{
 .cov-hand{background:var(--ink)} .cov-marker{background:var(--green)}
 .cov-rule{background:var(--brass)} .cov-judge{background:#3E6B8A} .cov-none{background:#B3AB9C}
 .cov-note{font-size:12px; color:var(--ink-2); margin:7px 0 0}
+.criteria{margin:0; padding-left:18px; color:var(--ink-2); font-size:12px; line-height:1.65}
+.criteria li{margin:0 0 3px}
 .checks{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:26px}
 .check{border-left:3px solid var(--rule); padding-left:14px; font-size:12.5px; color:var(--ink-2)}
 .check.ok{border-left-color:var(--green)}
@@ -763,7 +769,7 @@ table.calib .below{color:var(--red)}
       </div>
     </div>
     <ul class="overview"><li><button data-go="corpus" class="on">
-      <span class="ix-proj">Every session</span>
+      <span class="ix-proj">${esc(framing(c.selection).title)}</span>
       <span class="ix-syn">the corpus, and the founding question</span>
     </button></li></ul>
     <h2>Sessions by cost</h2>

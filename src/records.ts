@@ -302,14 +302,34 @@ const bump = (m: Record<string, number>, k: string): void => {
   m[k] = (m[k] ?? 0) + 1;
 };
 
+export interface Transcript {
+  lines: SessionLine[];
+  stats: ParseStats;
+  /** The directory the session was working in, as the transcript itself reports it:
+   * the FIRST `cwd` any line carries.
+   *
+   * First rather than last, because `cwd` follows the agent — a `cd` inside a Bash call
+   * moves it for every subsequent line — so later values name subdirectories the work
+   * wandered into, while the first names the directory the session was opened in. That
+   * is the one Claude Code derives the project directory's name from.
+   *
+   * `null` when no line carried one, which is a fact about the transcript rather than a
+   * failure: bookkeeping-only lines (`mode`, `summary`, `last-prompt`) have no `cwd`, so
+   * a transcript made of nothing else has no working directory to report. Left as a
+   * typed absence for `workspaceOf` to resolve, rather than defaulted to a string that
+   * would read like an answer. [LAW:no-silent-failure] */
+  cwd: string | null;
+}
+
 /** Parse a whole transcript's text into records plus the stats about them.
  *
  * [LAW:effects-at-boundaries] Takes the text, not a path. Reading the file is the
  * driver's job, which keeps this — and therefore the entire analysis above it —
  * testable against a string literal with no filesystem at all. */
-export function parseTranscript(text: string): { lines: SessionLine[]; stats: ParseStats } {
+export function parseTranscript(text: string): Transcript {
   const stats = emptyStats();
   const lines: SessionLine[] = [];
+  let cwd: string | null = null;
   for (const raw of text.split('\n')) {
     if (!raw.trim()) continue;
     stats.totalLines++;
@@ -320,12 +340,16 @@ export function parseTranscript(text: string): { lines: SessionLine[]; stats: Pa
       stats.unparseableLines++;
       continue;
     }
+    const o = asObj(decoded);
     const line = parseLine(decoded);
     lines.push(line);
     stats.byKind[line.kind]++;
-    const rawType = (asObj(decoded) && str(asObj(decoded)!.type, '(untyped)')) || '(untyped)';
-    bump(stats.byType, rawType);
+    bump(stats.byType, str(o?.type, '(untyped)'));
     if (line.kind === 'unknown') bump(stats.unknownTypes, line.type);
+    // `cwd` is a fact about the TRANSCRIPT, not about any one record, so it is read here
+    // rather than threaded through four line variants that would each carry it and
+    // oblige every consumer to hunt for the first one holding a value.
+    cwd ??= str(o?.cwd) || null;
   }
-  return { lines, stats };
+  return { lines, stats, cwd };
 }

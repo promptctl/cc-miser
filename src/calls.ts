@@ -88,11 +88,11 @@ export interface ToolExec {
 /** WHERE a turn's text came from.
  *
  * Not everything arriving as a "user" message was typed by a user. The harness injects
- * skill bodies, slash-command envelopes, caveats, task notifications, interrupt markers
- * and compaction summaries down the same channel, and they are 40% of all turns in this
- * corpus. Left as raw text, every one of them becomes a span label reading
- * "Base directory for this skill: /Users/<you>/.claude/plugins/cache/..." — which names
- * the envelope instead of the work.
+ * skill bodies, slash-command envelopes, caveats, task notifications, interrupt markers,
+ * shell commands and compaction summaries down the same channel, and they are 76% of all
+ * turns measured across the development corpus. Left as raw text, every one of them
+ * becomes a span label reading "Base directory for this skill: …/skills/code" — which
+ * names the envelope instead of the work.
  *
  * [LAW:types-are-the-program] Origin is a FIELD decided once, not a prefix that each
  * consumer re-sniffs. The flamegraph, the session rail and the synopsis all want the
@@ -137,15 +137,29 @@ const display = (s: string, n: number = SUMMARY_LEN): string => s.replace(/\s+/g
  *
  * [LAW:dataflow-not-control-flow] A newly-observed envelope is a new ROW, never
  * another branch. Every pattern here was taken from a real transcript rather than
- * guessed — the eight below cover 40% of the 1,439 turns sampled across the corpus.
- * Anything unmatched falls through to `user`, which is the honest default: text we
- * cannot attribute to the harness is text a person probably wrote. */
+ * guessed. Anything unmatched falls through to `user`, which is the honest default: text
+ * we cannot attribute to the harness is text a person probably wrote.
+ *
+ * PORTABLE, AND CHECKED RATHER THAN ASSUMED. Every pattern matches a wrapper Claude Code
+ * itself emits, so none of them depends on one user's skills, plugins or configuration —
+ * the closest thing to a local assumption is splitting a skill path on `/skills/`, which
+ * is the plugin cache's own layout and falls back to the whole path when absent.
+ *
+ * The check that established this also found what the table was MISSING, which is the
+ * point of running it: replaying `readTurn` over all 3,353 turns of the development
+ * corpus and listing everything that fell through to `user` while still looking like an
+ * envelope surfaced 34 turns of `<bash-input>`/`<bash-stdout>` — the `!command` feature —
+ * being counted as a person asking for work. They are rows now. The fall-through is
+ * silent by design, so the only way this table stays true is by periodically asking it
+ * what it failed to match. */
 const ORIGIN_RULES: ReadonlyArray<{
   when: RegExp;
   read: (text: string, m: RegExpExecArray) => { origin: TurnOrigin; snippet: string };
 }> = [
   {
-    // "Base directory for this skill: /Users/.../plugins/cache/promptctl/laws/0.17.0/skills/code"
+    // "Base directory for this skill: <plugin cache>/promptctl/laws/0.17.0/skills/code"
+    // — only the tail after `/skills/` names the skill; everything before it is wherever
+    // this machine happens to keep its plugin cache.
     when: /^Base directory for this skill:\s*(\S+)/,
     read: (_t, m) => {
       const skill = m[1]!.split('/skills/').pop() ?? m[1]!;
@@ -171,6 +185,17 @@ const ORIGIN_RULES: ReadonlyArray<{
   },
   { when: /^<local-command-caveat>/, read: () => harness('local command caveat') },
   { when: /^<local-command-stdout>/, read: () => harness('local command output') },
+  {
+    // `!ls` — a shell command run in the session rather than a prompt. A person typed
+    // the command, but they were not asking the model for anything, so counting it as
+    // user intent overstates how often work was requested.
+    when: /^<bash-input>([\s\S]*?)<\/bash-input>/,
+    read: (_t, m) => ({
+      origin: { kind: 'harness', what: 'shell command' },
+      snippet: `! ${display(m[1]!.trim(), TURN_LEN)}`,
+    }),
+  },
+  { when: /^<bash-(?:stdout|stderr)>/, read: () => harness('shell output') },
   { when: /^<task-notification>/, read: () => harness('task notification') },
   { when: /^\[Request interrupted by user/, read: () => harness('interrupted by user') },
   { when: /^\[Image: /, read: () => harness('pasted image') },

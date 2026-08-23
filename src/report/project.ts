@@ -218,7 +218,7 @@ export function projectSession(a: AnalyzedSession, models: ModelTable): SessionR
 
   return {
     sessionId: a.source.sessionId,
-    project: a.source.project,
+    workspace: a.workspace,
     startedAt: a.tree.tStart,
     endedAt: a.tree.tEnd,
     // EVERY model the session ran, not the first call's.

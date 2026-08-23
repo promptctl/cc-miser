@@ -13,10 +13,15 @@ import { parseTranscript, type ParseStats } from './records.ts';
 import { conservation, findEpochs, type ConservationCheck, type Residency } from './residency.ts';
 import { buildSessionTree, type Span } from './spans.ts';
 import { UNCLASSIFIED, assertPartition, type Label } from './activity.ts';
+import { workspaceOf, type Workspace } from './workspace.ts';
 import type { SessionSource } from './discover.ts';
 
 export interface AnalyzedSession {
   source: SessionSource;
+  /** Where this session's work happened. Resolved here because this is the one place
+   * holding both of the session's claims about itself: the directory it was filed
+   * under, and the `cwd` its own lines report. */
+  workspace: Workspace;
   /** The root conversation — the part a human can read. */
   conversation: Conversation;
   forest: Forest;
@@ -38,7 +43,7 @@ export interface AnalyzedSession {
 export type ReadText = (path: string) => string;
 
 export function analyzeSession(source: SessionSource, readText: ReadText): AnalyzedSession {
-  const { lines, stats } = parseTranscript(readText(source.path));
+  const { lines, stats, cwd } = parseTranscript(readText(source.path));
   const conversation = buildConversation(lines);
 
   const candidates: Candidate[] = source.subagents.map((s) => ({
@@ -65,6 +70,7 @@ export function analyzeSession(source: SessionSource, readText: ReadText): Analy
 
   return {
     source,
+    workspace: workspaceOf(source.project, cwd),
     conversation,
     forest,
     labels,
