@@ -19,18 +19,25 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildConversation } from '../calls.ts';
-import { discoverSessions, hasSpawns, type SessionSource } from '../discover.ts';
+import { discoverSessions, hasSpawns, projectsRoot, type SessionSource } from '../discover.ts';
 import { fitTokenizers, PRICE_SOURCE, addPrices, ZERO_PRICES, type ModelTable } from '../models.ts';
 import { addOutput, calibrationGroup, ZERO_OUTPUT } from '../output.ts';
 import { parseTranscript } from '../records.ts';
 import { analyzeSession } from '../session.ts';
 import { eqCost } from '../tokens.ts';
+import { readArgs } from './args.ts';
 import { projectSession } from './project.ts';
 import { renderCorpus } from './render.ts';
-import type { Calibration, CorpusReport, Coverage, Ledger, SessionReport, Tier } from './model.ts';
+import type {
+  Calibration,
+  CorpusReport,
+  Coverage,
+  Ledger,
+  Selection,
+  SessionReport,
+  Tier,
+} from './model.ts';
 
-const HOME = process.env.HOME ?? '';
-const PROJECTS = join(HOME, '.claude', 'projects');
 // Generated output, never checked in. It used to land in `examples/report/`, which put
 // build output and hand-authored specimen artifacts in one directory under one name —
 // two concerns sharing a home. [LAW:decomposition] The specimen is gone; the joint the
@@ -49,8 +56,18 @@ const countLines = (text: string): number => {
  * small enough that the whole batch finishes quickly, and spread across projects.
  *
  * Reading every transcript to count its lines costs ~370ms over the whole corpus,
- * which is why discovery stays stat-only and this cost is spent explicitly here. */
-function select(sources: readonly SessionSource[], limit: number): SessionSource[] {
+ * which is why discovery stays stat-only and this cost is spent explicitly here.
+ *
+ * RETURNS ITS OWN DESCRIPTION. [LAW:one-source-of-truth] These constants used to be
+ * invisible: the page headlined itself "Every session" while this function quietly threw
+ * most of the corpus away. The fix is not to reword the headline — a hand-written
+ * caption beside a filter is a second copy with a schedule, and the next person to tune
+ * `MAX_LINES` would not think to go and edit prose in the renderer. So the filter states
+ * what it did, in the same expression that does it, and the page renders that. */
+function select(
+  sources: readonly SessionSource[],
+  limit: number,
+): { picked: SessionSource[]; criteria: string[] } {
   const MIN_LINES = 60;
   const MAX_LINES = 700;
   const PER_PROJECT = 2;
@@ -70,14 +87,34 @@ function select(sources: readonly SessionSource[], limit: number): SessionSource
   // have the most sessions, and the corpus view stops being a view of the corpus.
   const seen = new Map<string, number>();
   const picked: SessionSource[] = [];
+  let cappedOut = 0;
   for (const { source } of ordered) {
     const k = seen.get(source.project) ?? 0;
-    if (k >= PER_PROJECT) continue;
+    if (k >= PER_PROJECT) {
+      cappedOut++;
+      continue;
+    }
     seen.set(source.project, k + 1);
     picked.push(source);
     if (picked.length >= limit) break;
   }
-  return picked;
+
+  return {
+    picked,
+    // Counted, never estimated, and stated at zero as well — "excluded 0" and a missing
+    // line are different facts, and only one of them is evidence the filter is idle.
+    criteria: [
+      `transcript length between ${MIN_LINES} and ${MAX_LINES} lines — excluded ` +
+        `${sources.length - sized.length} of ${sources.length} discovered sessions, ` +
+        `among them every session longer than ${MAX_LINES} lines, which are the ` +
+        `expensive ones`,
+      `at most ${PER_PROJECT} sessions per project — excluded ${cappedOut} more`,
+      // Never negative: every iteration of the loop above either counts a session out or
+      // picks it, so the two can only sum to the eligible set.
+      `--limit ${limit} — left ${sized.length - cappedOut - picked.length} ` +
+        `eligible sessions unexamined`,
+    ],
+  };
 }
 
 /** Fit one tokenizer per model id from EVERY transcript on the machine, main
@@ -178,10 +215,12 @@ function corpusCoverage(sessions: readonly SessionReport[]): Coverage {
 }
 
 function main(): void {
-  const limit = Number(process.argv[2] ?? 24);
+  const { projects, limit } = readArgs(process.argv.slice(2));
+  const root = projectsRoot(projects, process.env);
   mkdirSync(OUT, { recursive: true });
 
-  const sources = discoverSessions(PROJECTS);
+  const sources = discoverSessions(root);
+  console.log(`scanning ${root}: ${sources.length} sessions`);
 
   const models = calibrate(sources, readText);
   console.log(
@@ -190,7 +229,12 @@ function main(): void {
       .join(', ')}`,
   );
 
-  const picked = select(sources, limit);
+  const { picked, criteria } = select(sources, limit);
+  const selection: Selection = {
+    discovered: sources.length,
+    rendered: picked.length,
+    criteria,
+  };
   console.log(`analyzing ${picked.length} sessions...`);
 
   const sessions: SessionReport[] = [];
@@ -215,22 +259,27 @@ function main(): void {
   const corpus: CorpusReport = {
     generatedAt: Date.now(),
     sessions,
+    selection,
+    // The titles say WHAT is bucketed, never how much of the corpus is in the bucket.
+    // They used to open "Across every session", which restated a coverage claim the
+    // masthead also makes — three more copies to keep true, and all three were false
+    // under sampling. [LAW:one-source-of-truth] The claim is made once, from `selection`.
     ledgers: [
       corpusLedger(
         'activity',
-        'Across every session, by activity',
+        'By activity',
         'The founding question, over real history rather than one specimen.',
         sessions,
       ),
       corpusLedger(
         'depth',
-        'Across every session, by spawn depth',
-        'How much of the corpus is work no human ever reads.',
+        'By spawn depth',
+        'How much of this is work no human ever reads.',
         sessions,
       ),
       corpusLedger(
         'output',
-        'Across every session, what the output bought',
+        'What the output bought',
         'Reasoning you never see, against text and tool calls you do.',
         sessions,
       ),

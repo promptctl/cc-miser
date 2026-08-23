@@ -30,6 +30,7 @@ import type { Spawn } from '../lineage.ts';
 import type { Activity, Label, Tier } from '../activity.ts';
 import type { OutputTotals } from '../output.ts';
 import type { PriceTotals, TokenizerFit } from '../models.ts';
+import type { Workspace } from '../workspace.ts';
 
 export type {
   Basis,
@@ -44,6 +45,7 @@ export type {
   OutputTotals,
   PriceTotals,
   TokenizerFit,
+  Workspace,
 };
 
 /** What the report was able to calibrate and price, stated as data rather than left for
@@ -184,7 +186,11 @@ export interface ArenaBasis {
 
 export interface SessionReport {
   sessionId: string;
-  project: string;
+  /** Where the work happened, carried as the resolved identity rather than the raw
+   * directory slug. A slug is a whole filesystem path with its separators flattened, so
+   * a renderer handed one has no way to reach a project name without guessing at an
+   * inverse that does not exist. [LAW:parse-dont-validate] */
+  workspace: Workspace;
   startedAt: number;
   endedAt: number;
   model: string;
@@ -218,9 +224,34 @@ export interface SessionReport {
   notes: readonly string[];
 }
 
+/** Which sessions the page is built from, against how many exist.
+ *
+ * [FRAMING:representation] The page is a map of a corpus, and it used to headline itself
+ * "Every session" / "The whole account" while rendering a filtered sample — on the
+ * development corpus, 24 of 271 sessions, with a line band that excluded 57% of all
+ * transcript lines and excluded them from the LONG end, which is where the spend is. A
+ * caption that overstates coverage in the direction of the money is the worst version of
+ * a wrong map, and on a corpus nobody has looked at there is no way to notice.
+ *
+ * Carried as data so the masthead is DERIVED from the selection rather than asserted
+ * beside it. [LAW:one-source-of-truth] The selector writes `criteria`; nothing
+ * downstream restates a coverage claim in prose that a change to the filters could
+ * silently falsify. */
+export interface Selection {
+  /** Sessions discovered under the projects root. */
+  discovered: number;
+  /** Sessions actually analyzed and rendered here. */
+  rendered: number;
+  /** Every filter applied, in the selector's own words, with what each one cost.
+   * Empty only if the selector applied nothing at all. */
+  criteria: readonly string[];
+}
+
 export interface CorpusReport {
   generatedAt: number;
   sessions: readonly SessionReport[];
+  /** What this page covers, and what it left out. */
+  selection: Selection;
   /** Ledgers computed across every session, not per-session. */
   ledgers: readonly Ledger[];
   total: Cost;

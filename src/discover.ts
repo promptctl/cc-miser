@@ -21,9 +21,14 @@ export interface SubagentSource {
 }
 
 export interface SessionSource {
-  /** The project directory's slug: the project's absolute path with each `/` flattened
-   * to `-`, e.g. `-Users-you-code-cc-miser`. Rendered through `projectLabel` rather
-   * than shown raw — it is a whole filesystem path, not a name. */
+  /** The project directory's name, which Claude Code derives from the project's absolute
+   * path by flattening every character outside `[A-Za-z0-9]` to `-`.
+   *
+   * A whole filesystem path, not a project name, and NEVER shown to a person: the
+   * flattening is lossy and has no inverse. `workspaceOf` in `workspace.ts` turns this
+   * plus the transcript's own `cwd` into something displayable. Kept here because it is
+   * the only identity available before a file has been opened, which is what the
+   * per-project scoping below runs on. */
   project: string;
   sessionId: string;
   /** The main conversation's JSONL. */
@@ -39,6 +44,40 @@ export interface SessionSource {
 
 const SESSION_ID = /^(.+)\.jsonl$/;
 const AGENT_FILE = /^agent-(.+?)(\.meta\.json|\.jsonl)$/;
+
+/** Claude Code's own transcript directory, for the machine this is running on.
+ *
+ * [LAW:no-silent-failure] A missing home variable THROWS. The previous
+ * `join(process.env.HOME ?? '', '.claude', 'projects')` turned an unset HOME into the
+ * root `/.claude/projects` — a real-looking path that fails much later, at a `readdir`
+ * that names the wrong thing, rather than at the assumption that actually broke. HOME is
+ * unset on Windows, where `USERPROFILE` is the equivalent, so both are consulted before
+ * giving up. (Reasoned from the variable's absence; not observed on a Windows machine.)
+ */
+function defaultProjectsRoot(env: Record<string, string | undefined>): string {
+  const home = env.HOME || env.USERPROFILE;
+  if (!home)
+    throw new Error(
+      'cannot locate the Claude Code projects directory: neither HOME nor USERPROFILE is ' +
+        'set. Pass the directory explicitly with --projects <dir>.',
+    );
+  return join(home, '.claude', 'projects');
+}
+
+/** Where to scan, given whatever the caller was told on the command line.
+ *
+ * Overridable because the default is correct on a normal machine and useless on the ones
+ * that matter: an export, an archive, a mounted volume, or a second Claude installation.
+ * [LAW:no-mode-explosion] One knob, and it is a VALUE — a path — rather than a mode:
+ * there is exactly one code path, and `--projects` changes what flows down it. The
+ * default is computed lazily so an explicit root works on a machine with no HOME at all.
+ *
+ * [LAW:effects-at-boundaries] `env` is a parameter, so this is a pure function of its
+ * inputs and testable without mutating the process environment. */
+export const projectsRoot = (
+  explicit: string | null,
+  env: Record<string, string | undefined>,
+): string => explicit ?? defaultProjectsRoot(env);
 
 /** The subagent transcripts filed under one session.
  *
