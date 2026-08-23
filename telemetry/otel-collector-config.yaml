@@ -1,0 +1,56 @@
+# One OTLP endpoint for Claude Code to talk to, fanned out to two backends.
+#
+# Claude Code can only be pointed at a single OTLP destination per signal, so the
+# collector is what lets traces reach Jaeger and metrics reach Prometheus without
+# configuring the client twice.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+exporters:
+  # Traces go to Jaeger over OTLP. Jaeger's own OTLP ports are not published to the
+  # host, so this address is reachable only inside the compose network.
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Metrics are exposed for Prometheus to scrape rather than pushed.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    send_timestamps: true
+    metric_expiration: 180m
+
+  # Prints what arrives. Comment into a pipeline when nothing shows up downstream
+  # and you need to know whether the collector is receiving anything at all.
+  debug:
+    verbosity: detailed
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+  telemetry:
+    logs:
+      level: info
