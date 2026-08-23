@@ -5,10 +5,16 @@
 // pure functions on either side of it.
 //
 // [LAW:one-source-of-truth] The producer is `src/` — the same primitives any other
-// consumer would call. It is NOT the hand-trace oracle: an oracle that produces cannot
-// check itself, and routing production through one is what previously put a scheduled
-// rip-out into this file. `examples/hand-trace/trace.ts` now computes the same figures
-// independently and ASSERTS agreement, which is the job it was built for.
+// consumer would call. An oracle that produces cannot check itself, so nothing on this
+// path is allowed to double as the verifier.
+//
+// NOTHING CURRENTLY CHECKS THESE FIGURES INDEPENDENTLY. Until miser-portability-adi.1
+// this comment named `examples/hand-trace/trace.ts` — a second implementation that
+// recomputed every number from raw JSONL and asserted agreement on 16 quantities. It
+// was deleted with the rest of the specimen because it was welded to one session UUID
+// on one machine. That check is a real loss, and miser-portability-adi.4 rebuilds it on
+// synthetic fixtures. Said here rather than left implied: a repo that quietly stops
+// verifying itself is worse off than one that never claimed to.
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -21,7 +27,11 @@ import type { CorpusReport, Coverage, Ledger, SessionReport, Tier } from './mode
 
 const HOME = process.env.HOME ?? '';
 const PROJECTS = join(HOME, '.claude', 'projects');
-const OUT = join(import.meta.dirname, '..', '..', 'examples', 'report');
+// Generated output, never checked in. It used to land in `examples/report/`, which put
+// build output and hand-authored specimen artifacts in one directory under one name —
+// two concerns sharing a home. [LAW:decomposition] The specimen is gone; the joint the
+// two were sharing is now cut, and `out/` says what this is.
+const OUT = join(import.meta.dirname, '..', '..', 'out');
 
 const readText = (p: string): string => readFileSync(p, 'utf8');
 

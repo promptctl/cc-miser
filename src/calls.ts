@@ -91,7 +91,7 @@ export interface ToolExec {
  * skill bodies, slash-command envelopes, caveats, task notifications, interrupt markers
  * and compaction summaries down the same channel, and they are 40% of all turns in this
  * corpus. Left as raw text, every one of them becomes a span label reading
- * "Base directory for this skill: /Users/you/.claude/plugins/cache/..." — which names
+ * "Base directory for this skill: /Users/<you>/.claude/plugins/cache/..." — which names
  * the envelope instead of the work.
  *
  * [LAW:types-are-the-program] Origin is a FIELD decided once, not a prefix that each
