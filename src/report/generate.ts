@@ -18,12 +18,16 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { buildConversation } from '../calls.ts';
 import { discoverSessions, hasSpawns, type SessionSource } from '../discover.ts';
+import { fitTokenizers, PRICE_SOURCE, addPrices, ZERO_PRICES, type ModelTable } from '../models.ts';
+import { addOutput, calibrationGroup, ZERO_OUTPUT } from '../output.ts';
+import { parseTranscript } from '../records.ts';
 import { analyzeSession } from '../session.ts';
-import { eqCost, usdCost } from '../tokens.ts';
+import { eqCost } from '../tokens.ts';
 import { projectSession } from './project.ts';
 import { renderCorpus } from './render.ts';
-import type { CorpusReport, Coverage, Ledger, SessionReport, Tier } from './model.ts';
+import type { Calibration, CorpusReport, Coverage, Ledger, SessionReport, Tier } from './model.ts';
 
 const HOME = process.env.HOME ?? '';
 const PROJECTS = join(HOME, '.claude', 'projects');
@@ -76,6 +80,38 @@ function select(sources: readonly SessionSource[], limit: number): SessionSource
   return picked;
 }
 
+/** Fit one tokenizer per model id from EVERY transcript on the machine, main
+ * conversations and subagents alike.
+ *
+ * WHY THE WHOLE CORPUS AND NOT THE SESSIONS BEING REPORTED. The estimator is a property
+ * of a model, not of the handful of sessions on this page, so restricting the fit to
+ * them would throw away calibration points for no reason and leave thinly-used models —
+ * Haiku appears here only inside subagents — with no row at all. Reading everything
+ * costs about a second over 742 transcripts, which is the same order as the line-count
+ * pass `select` already makes.
+ *
+ * Grouped BY TRANSCRIPT because that is the unit `fitTokenizers` holds out: a fit has to
+ * be scored on sessions it never saw, and a group boundary is the only thing in this
+ * data that marks "a different session's writing style". [LAW:no-silent-failure] A
+ * transcript that will not parse is a pipeline bug and is thrown, not skipped — a
+ * calibration quietly fit on the subset of files that happened to open is exactly the
+ * kind of number nobody can check. */
+function calibrate(sources: readonly SessionSource[], readText: (p: string) => string): ModelTable {
+  const groups = sources.flatMap((s) =>
+    [s.path, ...s.subagents.map((a) => a.transcriptPath)].map((path) => {
+      try {
+        return calibrationGroup(buildConversation(parseTranscript(readText(path)).lines).calls);
+      } catch (e) {
+        throw new Error(
+          `failed to read ${path} for tokenizer calibration: ${e instanceof Error ? e.message : String(e)}`,
+          { cause: e },
+        );
+      }
+    }),
+  );
+  return fitTokenizers(groups);
+}
+
 /** Roll the same ledger shape up across sessions.
  *
  * [LAW:one-source-of-truth] One rule applied to a different grouping — the per-session
@@ -114,6 +150,19 @@ function corpusLedger(
   };
 }
 
+/** The calibration, carried to the page as data.
+ *
+ * [LAW:one-source-of-truth] The coefficients a reader sees are the very objects the
+ * arithmetic used. The alternative — a human transcribing the fit into a caption — is a
+ * second copy of a number that changes every time the corpus does. */
+const calibrationOf = (models: ModelTable): Calibration => ({
+  rows: [...models.tokenizers]
+    .map(([model, fit]) => ({ model, ...fit }))
+    .sort((a, b) => b.points - a.points),
+  seen: models.seen,
+  priceSource: PRICE_SOURCE,
+});
+
 /** Spend-weighted coverage across the corpus: a tiny session's perfect coverage must
  * not outvote a huge session's gaps. */
 function corpusCoverage(sessions: readonly SessionReport[]): Coverage {
@@ -132,7 +181,16 @@ function main(): void {
   const limit = Number(process.argv[2] ?? 24);
   mkdirSync(OUT, { recursive: true });
 
-  const picked = select(discoverSessions(PROJECTS), limit);
+  const sources = discoverSessions(PROJECTS);
+
+  const models = calibrate(sources, readText);
+  console.log(
+    `calibrated ${models.tokenizers.size} of ${models.seen.length} model ids: ${[...models.tokenizers]
+      .map(([m, f]) => `${m} ${f.charsPerToken.toFixed(2)}c/t ${(f.heldOutError * 100).toFixed(1)}%`)
+      .join(', ')}`,
+  );
+
+  const picked = select(sources, limit);
   console.log(`analyzing ${picked.length} sessions...`);
 
   const sessions: SessionReport[] = [];
@@ -142,7 +200,7 @@ function main(): void {
     // null }` here made a crash and an empty result indistinguishable. The path is
     // added to the message so the failure names the input that caused it.
     try {
-      sessions.push(projectSession(analyzeSession(source, readText)));
+      sessions.push(projectSession(analyzeSession(source, readText), models));
     } catch (e) {
       throw new Error(`failed to analyze ${source.path}: ${e instanceof Error ? e.message : String(e)}`, {
         cause: e,
@@ -152,7 +210,7 @@ function main(): void {
   }
   console.log();
 
-  sessions.sort((a, b) => b.totalUsd.value - a.totalUsd.value);
+  sessions.sort((a, b) => b.pricing.usd - a.pricing.usd);
 
   const corpus: CorpusReport = {
     generatedAt: Date.now(),
@@ -178,22 +236,17 @@ function main(): void {
       ),
     ],
     total: eqCost(sessions.reduce((a, s) => a + s.total.value, 0)),
-    totalUsd: usdCost(sessions.reduce((a, s) => a + s.totalUsd.value, 0)),
+    // [LAW:one-source-of-truth] Rolled up with the same associative combine the sessions
+    // were built from, rather than a second hand-written reducer that would have to
+    // remember to carry the unpriced remainder too — and, the first time someone added a
+    // field, would not.
+    pricing: sessions.reduce((a, s) => addPrices(a, s.pricing), ZERO_PRICES),
+    calibration: calibrationOf(models),
     coverage: corpusCoverage(sessions),
     // Summed, not spend-weighted like coverage above: these are token counts, and the
     // corpus figure a reader wants is "of all the output tokens I bought, how many were
     // reasoning" — a ratio of two totals, not an average of ratios.
-    output: sessions.reduce(
-      (a, s) => ({
-        total: a.total + s.output.total,
-        visible: a.visible + s.output.visible,
-        reasoning: a.reasoning + s.output.reasoning,
-        estimatorError: a.estimatorError + s.output.estimatorError,
-        callsWithReasoning: a.callsWithReasoning + s.output.callsWithReasoning,
-        calls: a.calls + s.output.calls,
-      }),
-      { total: 0, visible: 0, reasoning: 0, estimatorError: 0, callsWithReasoning: 0, calls: 0 },
-    ),
+    output: sessions.reduce((a, s) => addOutput(a, s.output), ZERO_OUTPUT),
   };
 
   const out = join(OUT, 'index.html');
@@ -202,7 +255,14 @@ function main(): void {
 
   console.log(`${sessions.length} sessions rendered`);
   console.log(
-    `corpus total: $${corpus.totalUsd.value.toFixed(2)} / ${corpus.total.value.toLocaleString()} tok-eq`,
+    `corpus total: $${corpus.pricing.usd.toFixed(2)} / ${corpus.total.value.toLocaleString()} tok-eq`,
+  );
+  // Printed at zero as well, so a clean run and an unchecked one are distinguishable.
+  console.log(
+    `unpriced: ${corpus.pricing.unpricedSpend.toLocaleString()} tok-eq across ${corpus.pricing.unpricedCalls} calls` +
+      `${corpus.pricing.unpriced.length ? ` (${corpus.pricing.unpriced.map((u) => u.model).join(', ')})` : ''}` +
+      ` · uncalibrated output: ${corpus.output.uncalibrated.toLocaleString()} tokens across ${corpus.output.uncalibratedCalls} calls` +
+      `${corpus.output.uncalibratedModels.length ? ` (${corpus.output.uncalibratedModels.join(', ')})` : ''}`,
   );
   console.log(
     `coverage: ${Object.entries(corpus.coverage.byTier)

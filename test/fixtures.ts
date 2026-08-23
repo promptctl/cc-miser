@@ -5,6 +5,28 @@
 // lets it assert things the real corpus cannot show, such as how the pipeline behaves
 // on a model that keeps its reasoning text.
 
+import type { ModelTable } from '../src/models.ts';
+
+/** A tokenizer table with coefficients chosen rather than fit.
+ *
+ * For tests whose subject is the SPLIT — how output divides once a tokenizer exists —
+ * rather than the fit that produces one. Handing those tests a real corpus fit would
+ * couple them to whatever machine they run on, which is the opposite of what a synthetic
+ * fixture is for. `heldOutError` is zero because nothing was held out: these coefficients
+ * were not measured, and the field says so honestly rather than inventing an error bar.
+ * [LAW:behavior-not-structure] */
+export const fixtureModels = (
+  entries: Record<string, { charsPerToken: number; tokensPerBlock: number }>,
+): ModelTable => ({
+  tokenizers: new Map(
+    Object.entries(entries).map(([model, c]) => [
+      model,
+      { ...c, points: 0, transcripts: 0, heldOutError: 0 },
+    ]),
+  ),
+  seen: Object.keys(entries).sort(),
+});
+
 /** One assistant turn's worth of content, in the shape the builder needs. */
 export interface TurnSpec {
   /** The reasoning the model did. The empty string is the STRIPPING regime — what
@@ -30,7 +52,17 @@ const line = (o: unknown): string => JSON.stringify(o);
  * is the CONTENT of `thinking`, flowing through unchanged. There is one code path here,
  * and the stripping and retaining transcripts differ only in the characters they carry.
  */
-export function buildTranscript(sessionId: string, turns: readonly TurnSpec[]): string {
+export function buildTranscript(
+  sessionId: string,
+  turns: readonly TurnSpec[],
+  /** The model id to write into every assistant line.
+   *
+   * A parameter rather than a constant because the model id is now load-bearing: it is
+   * the key both the tokenizer and the rate card are looked up by, and the only way to
+   * test what happens to an unrecognised one is to be able to write one.
+   * [LAW:dataflow-not-control-flow] */
+  model: string,
+): string {
   const out: string[] = [];
   let uuid = 0;
   const next = (): string => `u${String(++uuid).padStart(4, '0')}`;
@@ -79,7 +111,7 @@ export function buildTranscript(sessionId: string, turns: readonly TurnSpec[]): 
           timestamp: at(i * 2 + 1),
           sessionId,
           requestId,
-          message: { role: 'assistant', model: 'claude-opus-5', usage: usageAt(k), content: [b] },
+          message: { role: 'assistant', model, usage: usageAt(k), content: [b] },
         }),
       ),
     );
@@ -170,9 +202,12 @@ export const placeholderTailSession = (): string =>
   ].join('\n') + '\n';
 
 /** Two calls, one with reasoning and a tool call, one with reasoning and only text.
- * `thinking` is threaded in so the same session can be built under either regime. */
-export const twoCallSession = (thinking: string): string =>
-  buildTranscript('11111111-2222-3333-4444-555555555555', [
+ * `thinking` is threaded in so the same session can be built under either regime, and
+ * `model` so the same session can be built on a model the report has never heard of. */
+export const twoCallSession = (thinking: string, model = 'claude-opus-5'): string =>
+  buildTranscript(
+    '11111111-2222-3333-4444-555555555555',
+    [
     {
       thinking,
       text: 'Reading the file first.',
@@ -180,9 +215,11 @@ export const twoCallSession = (thinking: string): string =>
       result: 'export interface Arrival { size: Size }\n'.repeat(40),
       usage: { input: 12, cacheCreation: 4200, cacheRead: 0, output: 900 },
     },
-    {
-      thinking,
-      text: 'The seam is the type, so the fix goes in the signature.',
-      usage: { input: 3, cacheCreation: 610, cacheRead: 4200, output: 1400 },
-    },
-  ]);
+      {
+        thinking,
+        text: 'The seam is the type, so the fix goes in the signature.',
+        usage: { input: 3, cacheCreation: 610, cacheRead: 4200, output: 1400 },
+      },
+    ],
+    model,
+  );
