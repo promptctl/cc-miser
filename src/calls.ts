@@ -4,21 +4,20 @@
 // [LAW:effects-at-boundaries] Pure. Takes records, returns a conversation.
 
 import type { ContentBlock, SessionLine } from './records.ts';
-import type { Usage } from './tokens.ts';
+import { estimatedSize, exactSize, type Size, type Usage } from './tokens.ts';
 
 /** One API request.
  *
  * THE DEDUP RULE, stated once because getting it wrong silently corrupts everything
- * built on top: a call is the GROUP of JSONL lines sharing a requestId. `usage` is
- * taken from the group ONCE — every line repeats it verbatim, so summing overstates
- * by the fan-out factor (2.42x on the specimen). `blocks` is the UNION over the group
- * — each line carries a different block, so keeping only the first line drops most
- * tool calls (29 of the specimen's 33, with no error).
+ * built on top: a call is the GROUP of JSONL lines sharing a requestId. `blocks` is the
+ * UNION over the group — each line carries a different block, so keeping only the first
+ * line drops most tool calls (29 of the specimen's 33, with no error). `usage` is ONE
+ * snapshot from the group, chosen by `completeUsage` — never the sum, which overstates
+ * by the fan-out factor (2.42x on the specimen), and never the first line, which is the
+ * bug corrected below.
  *
  * [LAW:types-are-the-program] One rule cannot serve both: identity and payload are
- * different maps of the same call, and applying either rule to the other loses data.
- * Verified empirically in miser-validation-7xn — usage is byte-identical across every
- * line of every request group, so "take once" is safe; it is NOT a running total. */
+ * different maps of the same call, and applying either rule to the other loses data. */
 export interface Call {
   index: number;
   requestId: string;
@@ -31,13 +30,42 @@ export interface Call {
   blocks: ContentBlock[];
 }
 
+/** The more complete of two usage snapshots from one request group.
+ *
+ * WHY THIS EXISTS. An earlier version of this file recorded, as verified fact, that
+ * "usage is byte-identical across every line of every request group, so take-once is
+ * safe; it is NOT a running total." That was measured on the 28-call specimen and stated
+ * as a universal. It is false. Re-measured over all 740 transcripts with the grouping
+ * this function performs: 5,395 of 36,426 request groups disagree on `output_tokens`,
+ * because it is a PARTIAL count that grows as the response streams and only one line
+ * carries the finished figure. Taking the first line understated the corpus's output by
+ * 9,105,348 tokens — 27.4% of all output ever billed. Every other field
+ * (input, cache creation, cache read) genuinely is constant within a group.
+ *
+ * WHY MAX AND NOT LAST. Both rules agree on all 5,395 streaming groups. They disagree on
+ * three, where a placeholder line carries an all-zero usage block (`service_tier` and
+ * `iterations` both null) beside the real one: "last" would adopt the zeros and throw
+ * away a real call's entire cost. Max is also a property of the SET of lines rather than
+ * of the order they were appended in. [LAW:no-ambient-temporal-coupling]
+ *
+ * The greatest output wins the WHOLE snapshot, never field-by-field: a per-field maximum
+ * could assemble a usage vector that no line ever reported, which is a number with no
+ * source. [LAW:one-source-of-truth] */
+const completeUsage = (a: Usage, b: Usage): Usage => (b.output > a.output ? b : a);
+
 /** Something that entered the context window between two calls. */
 export interface Arrival {
   /** Index of the first call whose prompt contained it. */
   bornBeforeCall: number;
   source: ArrivalSource;
   label: string;
-  chars: number;
+  /** How much context this occupies, and how well that is known.
+   *
+   * [LAW:types-are-the-program] A raw `chars` field could not distinguish the one
+   * arrival whose size the API reports exactly from the ones we reconstruct, so every
+   * consumer estimated all of them alike and the exact figure was thrown away. The
+   * basis travels with the number instead. */
+  size: Size;
   /** Set when this arrival is a tool result, linking it to its tool_use block. */
   toolUseId: string;
 }
@@ -198,19 +226,21 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
 
     switch (line.kind) {
       case 'assistant': {
-        let call = byRequest.get(line.requestId);
-        if (!call) {
-          call = {
-            index: byRequest.size,
-            requestId: line.requestId,
-            lineCount: 0,
-            ts: line.ts,
-            model: line.model,
-            usage: line.usage, // taken ONCE per request group
-            blocks: [],
-          };
-          byRequest.set(line.requestId, call);
-        }
+        const call = byRequest.get(line.requestId) ?? {
+          index: byRequest.size,
+          requestId: line.requestId,
+          lineCount: 0,
+          ts: line.ts,
+          model: line.model,
+          usage: line.usage,
+          blocks: [],
+        };
+        byRequest.set(line.requestId, call);
+        // [LAW:dataflow-not-control-flow] The fold runs on EVERY line of the group,
+        // including the one that created the call — where it is a no-op against itself.
+        // The previous version ran it on no line at all, taking whichever usage the
+        // first line happened to carry.
+        call.usage = completeUsage(call.usage, line.usage);
         call.lineCount++;
         for (const block of line.blocks) {
           call.blocks.push(block); // unioned across the whole request group
@@ -235,7 +265,7 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
               bornBeforeCall: nextCall,
               source: 'toolResult',
               label: `${use?.name ?? '?'} ${use?.summary ?? ''}`.trim(),
-              chars: b.chars,
+              size: estimatedSize(b.chars),
               toolUseId: b.toolUseId,
             });
           } else if (b.kind === 'text') {
@@ -247,7 +277,7 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
             bornBeforeCall: nextCall,
             source: 'userText',
             label: display(line.snippet),
-            chars: userChars,
+            size: estimatedSize(userChars),
             toolUseId: '',
           });
         // A user line that is not a tool result opens a new turn.
@@ -269,7 +299,7 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
           bornBeforeCall: nextCall,
           source: 'attachment',
           label: line.attachmentType,
-          chars: line.chars,
+          size: estimatedSize(line.chars),
           toolUseId: '',
         });
         break;
@@ -284,39 +314,42 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
 
   const calls = [...byRequest.values()];
 
-  // Assistant output also occupies context on every later call.
+  // Assistant output also occupies context on every later call, and its size is the
+  // one arrival the API reports EXACTLY.
   //
-  // THINKING IS COUNTED HERE AND SHOULD NOT BE. Known bug, not a subtlety —
-  // miser-report-z52.3, ranked top of the report epic.
+  // THE MEASUREMENT THIS RESTS ON (miser-report-z52.3, whole corpus, no sampling). A
+  // call's prompt is exactly input + cache_creation + cache_read tokens, so the token
+  // delta between adjacent calls is exact. Across 33,984 boundaries that delta equals
+  // the previous call's `output_tokens` plus whatever arrived in between — to within
+  // 1% on low-noise cases, and `delta - output` is negative on 0.22% of them. Assistant
+  // output is resident at exactly its billed output tokens for the rest of its epoch.
   //
-  // Thinking tokens are billed as OUTPUT on the turn that produces them and are not
-  // carried into the next turn's context, so they must never be charged full
-  // epoch-length residency. This sum charges every block the same way, thinking
-  // included. It gets the right answer on all 22,505 thinking blocks in the current
-  // corpus only because every one of them is EMPTY — Claude Code strips the reasoning
-  // text for the six models present here, so `chars` is 0 and the block adds nothing.
+  // That holds ACROSS USER TURNS, which is what the ticket set out to test and the
+  // opposite of what it expected. One hand-checked case: a call with ~3,900 reasoning
+  // tokens, followed by a 45-character user message, was followed by a prompt 6,858
+  // tokens larger against an output of 6,841. Had the reasoning been stripped the delta
+  // would have been about -3,900. The cache agrees independently: stripping rewrites
+  // the prefix, and caching is a prefix match, so it would collapse cache_read at every
+  // user turn — measured drop rate there is 8.23%, against 6.62% after a call that did
+  // no thinking at all.
   //
-  // That stripping is MODEL-DEPENDENT, not universal. Against a transcript from a
-  // retaining model this silently inflates the arena and mis-assigns band dominance,
-  // with no error and no warning. The correctness is a property of the data we happen
-  // to hold, not of this code.
-  //
-  // Deliberately NOT fixed by dropping `kind === 'thinking'` here: if thinking survives
-  // its own turn's tool-use round trips (open question A on that ticket), the right
-  // model is a lifetime ending at the next user turn — shorter than its epoch, a shape
-  // the arena cannot yet express — and excluding it outright would be right across
-  // turns and wrong within one. Settle the lifetime first.
-  for (const c of calls) {
-    const chars = c.blocks.reduce((a, b) => a + blockChars(b), 0);
-    if (chars > 0)
-      arrivals.push({
-        bornBeforeCall: c.index + 1,
-        source: 'assistantOutput',
-        label: `assistant output of call ${c.index}`,
-        chars,
-        toolUseId: '',
-      });
-  }
+  // [LAW:types-are-the-program] So thinking needs no special case, and gets none: the
+  // arrival does not look at blocks. The previous version summed block characters,
+  // which made this number depend on whether the transcript WRITER kept a block's text
+  // — an incident of serialisation — rather than on what the model was billed for. A
+  // thinking block's text is stripped in all 22,568 blocks we hold, so that sum was
+  // silently omitting the reasoning share of every call: roughly 38% of all output
+  // tokens in the corpus, understated to zero. Sizing from `usage.output` deletes the
+  // estimator AND makes a retaining transcript and a stripping transcript of the same
+  // session produce identical residency, which `test/thinking-regime.test.ts` asserts.
+  for (const c of calls)
+    arrivals.push({
+      bornBeforeCall: c.index + 1,
+      source: 'assistantOutput',
+      label: `assistant output of call ${c.index}`,
+      size: exactSize(c.usage.output),
+      toolUseId: '',
+    });
 
   const tools: ToolExec[] = [];
   let unmatchedToolResults = 0;
@@ -345,5 +378,3 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
 
   return { calls, arrivals, tools, turns, unmatchedToolResults };
 }
-
-const blockChars = (b: ContentBlock): number => (b.kind === 'tool_use' ? b.inputChars : b.chars);

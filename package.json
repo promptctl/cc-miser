@@ -6,6 +6,7 @@
   "scripts": {
     "report": "bun run src/report/generate.ts",
     "oracle": "bun run examples/hand-trace/trace.ts",
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

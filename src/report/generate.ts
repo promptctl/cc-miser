@@ -160,10 +160,30 @@ function main(): void {
         'How much of the corpus is work no human ever reads.',
         sessions,
       ),
+      corpusLedger(
+        'output',
+        'Across every session, what the output bought',
+        'Reasoning you never see, against text and tool calls you do.',
+        sessions,
+      ),
     ],
     total: eqCost(sessions.reduce((a, s) => a + s.total.value, 0)),
     totalUsd: usdCost(sessions.reduce((a, s) => a + s.totalUsd.value, 0)),
     coverage: corpusCoverage(sessions),
+    // Summed, not spend-weighted like coverage above: these are token counts, and the
+    // corpus figure a reader wants is "of all the output tokens I bought, how many were
+    // reasoning" — a ratio of two totals, not an average of ratios.
+    output: sessions.reduce(
+      (a, s) => ({
+        total: a.total + s.output.total,
+        visible: a.visible + s.output.visible,
+        reasoning: a.reasoning + s.output.reasoning,
+        estimatorError: a.estimatorError + s.output.estimatorError,
+        callsWithReasoning: a.callsWithReasoning + s.output.callsWithReasoning,
+        calls: a.calls + s.output.calls,
+      }),
+      { total: 0, visible: 0, reasoning: 0, estimatorError: 0, callsWithReasoning: 0, calls: 0 },
+    ),
   };
 
   const out = join(OUT, 'index.html');

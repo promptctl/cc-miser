@@ -83,14 +83,28 @@ And some things are instants, not intervals: compaction boundaries, cache
 invalidations, model switches.
 
 One data trap, recorded because it invalidates naive analysis: a single API
-response fans out to several JSONL lines (one per content block), each repeating
-the identical usage object. Sum without deduplicating by `requestId` and every
-number is multiples too large. cc-miser dedupes at the parse boundary — but the
-rule needs stating precisely, because one obvious reading of it destroys the tree.
-A call is the *group* of lines sharing a `requestId`: its usage is taken **once**,
-and its content blocks are the **union** of the whole group. Identity and payload
-are different maps of the same call, and collapsing both with the same operation
-silently drops most of the session's tool calls.
+response fans out to several JSONL lines (one per content block), each carrying a
+usage object. Sum them without deduplicating by `requestId` and every number is
+multiples too large. cc-miser dedupes at the parse boundary — but the rule needs
+stating precisely, because two obvious readings of it each destroy something. A
+call is the *group* of lines sharing a `requestId`: its content blocks are the
+**union** of the whole group, and its usage is **one** snapshot from it. Identity
+and payload are different maps of the same call, and collapsing both with the same
+operation silently drops most of the session's tool calls.
+
+Which snapshot is not a formality, and getting it wrong cost this project 27.4% of
+every output token it had ever counted. In *root* transcripts every line of a group
+does repeat one finished usage object, so "take the first" looks correct and was
+verified as such. In *subagent* transcripts it is false: `output_tokens` is a
+partial count that rises block by block as the response streams, and only the last
+line holds the finished figure. 74.5% of subagent request groups stream, and
+first-line reads were recovering 594,863 of their 9,695,389 output tokens —
+**6%**. So the group's usage is the snapshot with the greatest `output_tokens`,
+which is also right on the handful of groups carrying an all-zero placeholder line
+that a last-wins rule would adopt. Every other field is genuinely constant within a
+group. The lesson generalizes past this one field: a property verified on root
+transcripts is a property of root transcripts, and subagent transcripts are written
+by a different path.
 
 ## The activity layer
 

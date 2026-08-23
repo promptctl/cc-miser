@@ -13,17 +13,19 @@ import { allCalls, isSpawned, isToolSpan, rollup, rollupWhere, type Span } from 
 import { depthOf } from '../lineage.ts';
 import {
   CACHE_READ_MULTIPLE,
+  OUTPUT_CHARS_PER_TOKEN,
   WRITE_MULTIPLE,
   dollars,
   eqCost,
-  estimateTokens,
   inputEquivalents,
   spend,
   usdCost,
   type Usage,
 } from '../tokens.ts';
+import { totalOutput, type OutputTotals } from '../output.ts';
 import type { Tier } from '../activity.ts';
 import type {
+  ArenaBasis,
   CallRow,
   Coverage,
   Finding,
@@ -40,6 +42,16 @@ const pct = (n: number, d: number): string => (d === 0 ? '0.0' : ((n / d) * 100)
 export function projectSession(a: AnalyzedSession): SessionReport {
   const callSpans = allCalls(a.tree);
   const exact = rollup(a.tree);
+  // Every call in the session, spawned ones included, so the output split covers the
+  // same population as `exact` above. Call SPANS carry usage but not content blocks,
+  // and the split needs the blocks — so it is taken from the conversations, which is
+  // where blocks live. [LAW:one-source-of-truth] The two populations must match or the
+  // reasoning share would be a fraction of a different denominator than it is shown
+  // against.
+  const output = totalOutput([
+    ...a.conversation.calls,
+    ...a.forest.placed.flatMap((p) => p.conversation.calls),
+  ]);
   // [LAW:one-source-of-truth] Both figures come from ONE traversal with different
   // predicates, never from subtracting one from the other.
   const spawnedOnly = rollupWhere(a.tree, isSpawned);
@@ -117,6 +129,38 @@ export function projectSession(a: AnalyzedSession): SessionReport {
     };
   };
 
+  /** What the output tokens bought. The one ledger whose rows are not all the same
+   * kind of number, so it says which is which in the row itself rather than in a
+   * footnote nobody reads. */
+  const outputLedger = (o: OutputTotals): Ledger => {
+    // THREE rows, and the third is the point. `visible` is summed over every call while
+    // `reasoning` is claimed only on the calls that emitted a thinking block, so the two
+    // do not close: what is left is this estimator's error on the calls where the true
+    // reasoning is zero. Shown as its own row — including when it is negative — because
+    // two rows adding to 101.6% is a page inviting the reader to find the missing 1.6%
+    // themselves, and the answer is a number we already have.
+    // Keys stay short. Every row here is an estimate and the lede says so once, so
+    // tagging each one "(estimated)" restated it at the same altitude while squeezing
+    // the bar column to nothing — the ledger rendered with no bars at all.
+    const rows: Array<[string, number, string]> = [
+      ['reasoning', o.reasoning, `${o.callsWithReasoning} of ${o.calls} calls thought`],
+      ['visible text and tool calls', o.visible, 'what a reader can see'],
+      ['estimator error', o.estimatorError, 'where the true answer is 0'],
+    ];
+    return {
+      id: 'output',
+      title: 'What the output tokens bought',
+      lede: `${fmt(o.total)} output tokens is an EXACT figure, and the three rows below close on it exactly. The split is not exact: reasoning is whatever the visible blocks fail to explain, so it carries the estimator's error, and the third row is that error measured where the true answer is known to be zero.`,
+      rows: rows.map(([key, v, note]) => ({
+        key,
+        cost: eqCost(v),
+        share: v / Math.max(1, o.total),
+        calls: 0,
+        note,
+      })),
+    };
+  };
+
   const cacheLedger = (): Ledger => {
     const parts: Array<[string, number]> = [
       ['uncached input', exact.input],
@@ -175,7 +219,10 @@ export function projectSession(a: AnalyzedSession): SessionReport {
       callsExact: a.conservation.exactCalls,
     },
     coverage,
+    arenaBasis: arenaBasisOf(a.conversation.arrivals),
+    output,
     ledgers: [
+      outputLedger(output),
       ledgerBy(
         'activity',
         'By activity',
@@ -192,7 +239,7 @@ export function projectSession(a: AnalyzedSession): SessionReport {
       toolLedger(),
       cacheLedger(),
     ],
-    findings: findingsFor(a, exact, spawnedOnly, grandTotal),
+    findings: findingsFor(a, exact, spawnedOnly, grandTotal, output),
     strata: strataFor(a),
     flame: flameOf(a.tree),
     synopsis: synopsisFor(a, calls),
@@ -207,8 +254,25 @@ function findingsFor(
   exact: Usage,
   spawnedOnly: Usage,
   grandTotal: number,
+  output: OutputTotals,
 ): Finding[] {
   const findings: Finding[] = [];
+
+  // Reasoning is the largest single thing the transcript does not show you, and until
+  // this ticket it was the largest thing this report did not show you either. It is
+  // stated for every session — including the ones that did none, where the row reads
+  // zero — because a figure that appears only when it is large teaches the reader to
+  // read its absence as "small" rather than "not measured".
+  findings.push({
+    headline:
+      output.reasoning > 0
+        ? `Reasoning was ${pct(output.reasoning, Math.max(1, output.total))}% of output tokens`
+        : 'No reasoning tokens in this session',
+    detail: `${fmt(output.reasoning)} of ${fmt(output.total)} output tokens went to thinking the model did not show, across ${output.callsWithReasoning} of ${output.calls} calls. Billed as output at the full output rate, and — measured against exact prompt sizes — resident in the context window for the rest of its cache epoch, exactly like text you can read. The split is an ESTIMATE: output totals are exact, the visible part is reconstructed from characters at ${OUTPUT_CHARS_PER_TOKEN} chars per token, and reasoning is the difference. The same arithmetic on calls that did no thinking returns ${fmt(Math.abs(output.estimatorError))} tokens where the true answer is zero, which is the error bar.`,
+    cost: eqCost(output.reasoning),
+    shareOfSession: output.reasoning / grandTotal,
+    severity: output.reasoning / grandTotal > 0.05 ? 'high' : 'note',
+  });
 
   for (const e of a.residency.epochs.slice(1)) {
     const penalty = invalidationExcess(e);
@@ -232,7 +296,7 @@ function findingsFor(
 
   const biggest = biggestToolResult(a.conversation.arrivals);
   if (biggest) {
-    const est = estimateTokens(biggest.chars);
+    const est = biggest.size.tokens;
     const tc = trueCost(biggest, est, a.residency);
     findings.push({
       headline: `Largest tool result cost ${tc.multiple.toFixed(1)}x its size`,
@@ -268,25 +332,40 @@ function findingsFor(
 }
 
 const biggestToolResult = (arrivals: readonly Arrival[]): Arrival | undefined =>
-  arrivals.filter((x) => x.source === 'toolResult').sort((x, y) => y.chars - x.chars)[0];
+  arrivals.filter((x) => x.source === 'toolResult').sort((x, y) => y.size.tokens - x.size.tokens)[0];
+
+/** How much of the arena is exactly known. Assistant output is; the rest is chars/4. */
+const arenaBasisOf = (arrivals: readonly Arrival[]): ArenaBasis => {
+  const of = (basis: string): number =>
+    arrivals.filter((x) => x.size.basis === basis).reduce((s, x) => s + x.size.tokens, 0);
+  const exactTokens = of('exact-api-usage');
+  const estimatedTokens = of('estimated-from-chars');
+  const all = exactTokens + estimatedTokens;
+  return { exactTokens, estimatedTokens, exactShare: all === 0 ? 0 : exactTokens / all };
+};
 
 /** The arena: one band per allocation, born at a call, alive until its epoch ends. */
 function strataFor(a: AnalyzedSession): Stratum[] {
-  // Characters per source, per call. Dominance is decided by weight, not by whether
-  // anything disagreed — see the note on Stratum.source.
-  const charsBySource = new Map<number, Map<StratumSource, number>>();
+  // Tokens per source, per call. Dominance is decided by weight, not by whether anything
+  // disagreed — see the note on Stratum.source.
+  //
+  // Weighed in TOKENS, not characters. Assistant output is now sized from the API's
+  // exact figure while everything else is reconstructed from characters, so comparing
+  // the two by character count would be comparing a number that no longer exists
+  // against one that does. Tokens is the unit both are expressed in.
+  const bySource = new Map<number, Map<StratumSource, number>>();
   for (const arr of a.conversation.arrivals) {
-    const at = charsBySource.get(arr.bornBeforeCall) ?? new Map<StratumSource, number>();
-    at.set(arr.source, (at.get(arr.source) ?? 0) + arr.chars);
-    charsBySource.set(arr.bornBeforeCall, at);
+    const at = bySource.get(arr.bornBeforeCall) ?? new Map<StratumSource, number>();
+    at.set(arr.source, (at.get(arr.source) ?? 0) + arr.size.tokens);
+    bySource.set(arr.bornBeforeCall, at);
   }
 
   return a.conversation.calls
     .filter((c) => c.usage.cacheCreation > 0)
     .map((c) => {
       const arrivals = a.conversation.arrivals.filter((x) => x.bornBeforeCall === c.index);
-      const biggest = [...arrivals].sort((x, y) => y.chars - x.chars)[0];
-      const dominant = dominantSource(charsBySource.get(c.index));
+      const biggest = [...arrivals].sort((x, y) => y.size.tokens - x.size.tokens)[0];
+      const dominant = dominantSource(bySource.get(c.index));
       // Call 0 is the startup payload by definition — system prompt, tool definitions,
       // CLAUDE.md, skill listings — none of which arrive as a transcript record.
       return c.index === 0
@@ -309,19 +388,19 @@ function strataFor(a: AnalyzedSession): Stratum[] {
     });
 }
 
-/** The source contributing the most characters, and its share.
+/** The source contributing the most tokens, and its share.
  *
  * [LAW:parse-dont-validate] A call with no arrivals at all returns `unattributed` with
  * a zero share, which says "nothing explains this band". Returning the first source, or
  * a plausible-looking `toolResult`, would be an answer-shaped void — indistinguishable
  * on the page from a band we genuinely attributed. */
-function dominantSource(byChars: Map<StratumSource, number> | undefined): {
+function dominantSource(byTokens: Map<StratumSource, number> | undefined): {
   source: StratumSource;
   share: number;
 } {
-  const entries = [...(byChars?.entries() ?? [])];
+  const entries = [...(byTokens?.entries() ?? [])];
   const total = entries.reduce((a, [, v]) => a + v, 0);
-  // Sorted by chars, then by name, so a tie resolves the same way on every run rather
+  // Sorted by tokens, then by name, so a tie resolves the same way on every run rather
   // than following Map insertion order.
   const top = entries.sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))[0];
   return top && total > 0

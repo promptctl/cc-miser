@@ -15,6 +15,7 @@
 
 import type {
   Activity,
+  ArenaBasis,
   CorpusReport,
   Cost,
   Coverage,
@@ -85,13 +86,19 @@ const SOURCE_COLOR: Record<Stratum['source'], string> = {
 // ---------------------------------------------------------------------------
 
 function ledgerBlock(l: Ledger): string {
-  const max = Math.max(...l.rows.map((r) => r.cost.value), 1);
+  // Scaled by MAGNITUDE, so a negative row draws a bar. The output ledger's estimator-
+  // error row is routinely negative, and `width:-3%` is invalid CSS — the browser drew
+  // nothing at all, leaving a row whose number said "-1,234" beside a bar that said
+  // "zero". Two renderings of one fact, disagreeing. The bar carries size; the sign is
+  // carried by the colour and by the number beside it. [FRAMING:representation]
+  const max = Math.max(...l.rows.map((r) => Math.abs(r.cost.value)), 1);
   const rows = l.rows
     .map((r) => {
       const colour = ACTIVITY_COLOR[r.key as Activity] ?? '#55503F';
+      const below = r.cost.value < 0 ? ' below' : '';
       return `<tr>
         <th scope="row"><span class="swatch" style="--c:${colour}"></span>${esc(r.key)}</th>
-        <td class="bar"><span style="width:${(r.cost.value / max) * 100}%;--c:${colour}"></span></td>
+        <td class="bar"><span class="${below.trim()}" style="width:${(Math.abs(r.cost.value) / max) * 100}%;--c:${colour}"></span></td>
         <td class="num">${n(r.cost.value)}</td>
         <td class="num pct">${pct(r.share)}</td>
         <td class="note">${esc(r.note)}</td>
@@ -275,6 +282,25 @@ function coverageBar(cov: Coverage): string {
   </div>`;
 }
 
+/** How much of the arena rests on exact numbers rather than on chars/4.
+ *
+ * Sits beside the coverage bar because it answers the same question on a different axis:
+ * coverage says how the page's LABELS were decided, this says how its SIZES were. The
+ * stratigraphy stacks one arrival the API measures exactly — every call's assistant
+ * output, reasoning included — against three reconstructed from characters, and a
+ * picture that does not say which is which invites the reader to trust all of it
+ * equally. Stated always, including at 100%, for coverageBar's reason: a figure that
+ * appears only when it is bad teaches the reader to read its absence as "fine". */
+function arenaBasisCheck(b: ArenaBasis): string {
+  return `<div class="check note">
+    <b>Arena sizes are ${pct(b.exactShare)} exact</b>
+    <p>${n(b.exactTokens)} of the ${n(b.exactTokens + b.estimatedTokens)} tokens stacked in
+    the stratigraphy come straight from an API <code>usage</code> block. The remaining
+    ${n(b.estimatedTokens)} — tool results, user text, attachments — are reconstructed
+    from characters, which ranks causes and never adjusts an exact number.</p>
+  </div>`;
+}
+
 /** The corpus view.
  *
  * PROJECT.md's founding question — how much goes to reviewing versus making changes —
@@ -316,6 +342,7 @@ function corpusSection(c: CorpusReport): string {
       <div><b>${n(calls)}</b><span>API calls</span></div>
       <div><b>${money(c.totalUsd)}</b><span>total</span></div>
       <div><b>${n(c.total.value / Math.max(1, calls))}</b><span>tok-eq per call</span></div>
+      <div><b>${pct(c.output.reasoning / Math.max(1, c.output.total))}</b><span>output was reasoning</span></div>
       <div><b>${pct(c.coverage.unclassified)}</b><span>unclassified</span></div>
     </div>
 
@@ -367,6 +394,7 @@ function sessionSection(s: SessionReport, idx: number): string {
       <div><b>${(s.usage.cacheRead / Math.max(1, s.usage.cacheCreation)).toFixed(1)}:1</b><span>read : write</span></div>
       <div><b>${s.epochs.length}</b><span>cache epoch${s.epochs.length === 1 ? '' : 's'}</span></div>
       <div><b>${Math.max(0, ...s.calls.map((c) => c.depth))}</b><span>max spawn depth</span></div>
+      <div><b>${pct(s.output.reasoning / Math.max(1, s.output.total))}</b><span>output was reasoning</span></div>
     </div>
 
     <section class="panel">
@@ -390,6 +418,7 @@ function sessionSection(s: SessionReport, idx: number): string {
           (${n(cons.actualCacheRead)}) and the residency model's prediction (${n(cons.predictedCacheRead)}) —
           agree on <b>${cons.callsExact} of ${cons.callsChecked}</b> calls individually.</p>
         </div>
+        ${arenaBasisCheck(s.arenaBasis)}
         <div class="check note">
           <b>Parse</b>
           <ul>${s.notes.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
@@ -544,8 +573,14 @@ body::before{
 .ledger .num{font-family:var(--mono); text-align:right; white-space:nowrap}
 .ledger .pct{color:var(--ink-3); width:56px}
 .ledger .note{color:var(--ink-3); font-size:10.5px; text-align:right; white-space:nowrap}
-.ledger .bar{width:38%}
+/* min-width, because a nowrap note is unshrinkable and the table gave it the room by
+   taking it from here — on the output ledger the bar column collapsed to nothing and
+   every ledger row rendered barless. */
+.ledger .bar{width:38%; min-width:86px}
 .ledger .bar span{display:block; height:7px; background:var(--c); opacity:.72}
+/* A row below zero: hatched rather than solid, so it reads as "this went the other
+   way" at a glance instead of as an ordinary share of the total. */
+.ledger .bar span.below{background:repeating-linear-gradient(135deg,var(--c) 0 3px,transparent 3px 6px); opacity:.9}
 .swatch{display:inline-block; width:8px; height:8px; background:var(--c); margin-right:7px}
 
 /* the founding question */
@@ -566,11 +601,12 @@ body::before{
 .cov-hand{background:var(--ink)} .cov-marker{background:var(--green)}
 .cov-rule{background:var(--brass)} .cov-judge{background:#3E6B8A} .cov-none{background:#B3AB9C}
 .cov-note{font-size:12px; color:var(--ink-2); margin:7px 0 0}
-.checks{display:grid; grid-template-columns:1fr 1fr; gap:26px}
+.checks{display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:26px}
 .check{border-left:3px solid var(--rule); padding-left:14px; font-size:12.5px; color:var(--ink-2)}
 .check.ok{border-left-color:var(--green)}
 .check.warn{border-left-color:var(--red)}
 .check b{display:block; color:var(--ink); margin-bottom:3px; font-size:13px}
+.check code{font-family:var(--mono); font-size:11.5px}
 .check ul{margin:4px 0 0; padding-left:16px}
 .check li{margin:2px 0}
 @media (max-width:1000px){
