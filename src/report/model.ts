@@ -15,11 +15,12 @@
 // drift. It is re-exported so a renderer still needs exactly one import to speak the
 // whole model.
 
-import type { Cost, Projection, Usage } from '../tokens.ts';
+import type { Basis, Cost, Projection, Size, Usage } from '../tokens.ts';
 import type { Spawn } from '../lineage.ts';
 import type { Activity, Label, Tier } from '../activity.ts';
+import type { OutputTotals } from '../output.ts';
 
-export type { Cost, Projection, Usage, Spawn, Activity, Label, Tier };
+export type { Basis, Cost, Projection, Size, Usage, Spawn, Activity, Label, Tier, OutputTotals };
 
 export interface CallRow {
   index: number;
@@ -127,6 +128,19 @@ export interface Conservation {
   callsExact: number;
 }
 
+/** How much of the context-window arena rests on exact numbers rather than estimates.
+ *
+ * Required alongside `Coverage`, and for the same reason: the arena mixes one arrival
+ * the API sizes exactly (assistant output) with three we reconstruct from characters,
+ * and a picture that does not say which is which invites the reader to trust all of it
+ * equally. [LAW:types-are-the-program] */
+export interface ArenaBasis {
+  exactTokens: number;
+  estimatedTokens: number;
+  /** Share of arena tokens taken straight from an API `usage` block, 0..1. */
+  exactShare: number;
+}
+
 export interface SessionReport {
   sessionId: string;
   project: string;
@@ -142,6 +156,9 @@ export interface SessionReport {
   epochs: readonly Epoch[];
   conservation: Conservation;
   coverage: Coverage;
+  arenaBasis: ArenaBasis;
+  /** What the output tokens bought — visible text and tool calls, or reasoning. */
+  output: OutputTotals;
 
   ledgers: readonly Ledger[];
   findings: readonly Finding[];
@@ -162,4 +179,7 @@ export interface CorpusReport {
   total: Cost;
   totalUsd: Cost;
   coverage: Coverage;
+  /** Output split across every session, so the reasoning share is a corpus fact rather
+   * than an anecdote from whichever session is on screen. */
+  output: OutputTotals;
 }
