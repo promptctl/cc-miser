@@ -24,7 +24,14 @@ import {
   type CalibrationGroup,
   type CalibrationPoint,
 } from '../src/models.ts';
-import { FOREIGN_CWD, buildTranscript, fixtureModels, twoCallSession } from './fixtures.ts';
+import {
+  FOREIGN_CWD,
+  assistantTurn,
+  buildTranscript,
+  fixtureModels,
+  twoCallSession,
+  userSays,
+} from './fixtures.ts';
 
 /** A model id that cannot exist: no vendor ships it, no rate card names it, and no
  * corpus can calibrate it. The only honest response to it is a refusal. */
@@ -310,9 +317,24 @@ describe('a session that mixes models is priced per call, never at one rate', ()
   test('an uncalibrated model does not steal a calibrated one’s output split', () => {
     const table = fixtureModels({ 'claude-opus-5': { charsPerToken: 2.5, tokensPerBlock: 50 } });
     const known = convOf(twoCallSession('', 'claude-opus-5'));
-    const unknown = convOf(buildTranscript('22222222-3333-4444-5555-666666666666', [
-      { thinking: '', text: 'hello', usage: { input: 1, cacheCreation: 0, cacheRead: 0, output: 500 } },
-    ], IMPOSSIBLE, FOREIGN_CWD));
+    const unknown = convOf(
+      buildTranscript({
+        sessionId: '22222222-3333-4444-5555-666666666666',
+        model: IMPOSSIBLE,
+        cwd: FOREIGN_CWD,
+        startMinute: 0,
+        events: [
+          userSays('do the thing'),
+          assistantTurn({
+            thinking: '',
+            text: 'hello',
+            tools: [],
+            attachments: [],
+            usage: { input: 1, cacheCreation: 0, cacheRead: 0, output: 500 },
+          }),
+        ],
+      }),
+    );
 
     const out = totalOutput([...known.calls, ...unknown.calls], table);
     expect(out.uncalibrated).toBe(500);

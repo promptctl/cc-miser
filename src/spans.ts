@@ -129,8 +129,17 @@ function buildConversationSpan(
   const kids = directChildren(all, lineage);
   const idPrefix = lineage.length === 0 ? '' : `${immediateAgent(lineage)!.agentId}:`;
 
+  /** Which children have found a home, written by `graft` below as it places them.
+   *
+   * A ledger rather than a second pass that re-derives which kid attaches where: that
+   * derivation already exists in `callChildren`, and a copy of it here would be two
+   * routes to one fact, free to disagree about a conversation's existence.
+   * [LAW:one-source-of-truth] */
+  const grafted = new Set<string>();
+
   /** Build the span for one spawned conversation, inheriting our activity label. */
   const graft = (kid: PlacedConversation, atCall: number): Span => {
+    grafted.add(kid.meta.agentId);
     const inherited = activityFor(atCall);
     return buildConversationSpan(
       kid.conversation,
@@ -242,9 +251,39 @@ function buildConversationSpan(
     })
     .filter((s) => s.children.length > 0);
 
-  // A spawned conversation often has no user turn of its own; fall back to its calls
-  // so no call is ever dropped from the tree.
-  const body: Span[] = turnSpans.length > 0 ? turnSpans : [...callSpans.values()];
+  // EVERY CALL SPAN HAS EXACTLY ONE PARENT, and every placed conversation exactly one
+  // home. Both used to be promises rather than properties, and the corpus collected on
+  // both.
+  //
+  // [LAW:dataflow-not-control-flow] The rule this replaces was `turnSpans.length > 0 ?
+  // turnSpans : [...callSpans.values()]` — a fallback whose comment claimed "so no call
+  // is ever dropped from the tree". It covered the case where a conversation has NO
+  // turns and missed the one where it has turns that do not reach its first calls: a
+  // transcript that opens with API calls before any user-channel line (a compaction
+  // resume, or a subagent whose prompt line the writer never emitted) leaves those calls
+  // in no turn at all, and the tree simply did not contain them. Measured on 396 real
+  // sessions when this check was first run: one subagent lost 31 of its 39 calls — 79%
+  // of its spend — silently, from every rollup on the page.
+  //
+  // Stated as a partition instead of a fallback, the loss is not something to remember
+  // to handle: a call the turns do not cover is attached here by the same expression
+  // that covers the ordinary case.
+  const covered = new Set<number>();
+  for (const t of turnSpans) for (const c of t.children) covered.add(c.callFirst);
+  const looseCalls = [...callSpans.entries()].filter(([i]) => !covered.has(i)).map(([, s]) => s);
+
+  // The same law on the other axis. A child is normally grafted onto the call that
+  // spawned it, but a root conversation with no calls at all has nothing to graft onto —
+  // and that is a real session shape: when all of a session's work goes to one spawned
+  // agent, the root transcript records zero API calls and its 40-call child vanished
+  // entirely. It attaches to the conversation instead. [LAW:no-silent-failure]
+  const looseKids = kids
+    .filter((k) => !grafted.has(k.meta.agentId))
+    .map((k) => graft(k, immediateAgent(k.lineage)!.spawnedAtCall));
+
+  const body: Span[] = [...turnSpans, ...looseCalls, ...looseKids].sort(
+    (a, b) => a.tStart - b.tStart,
+  );
 
   return {
     ...head,
