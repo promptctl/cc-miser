@@ -286,18 +286,26 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
 
   // Assistant output also occupies context on every later call.
   //
-  // THINKING CONTRIBUTES ZERO HERE, AND THAT IS DELIBERATE. Thinking tokens are billed
-  // as OUTPUT on the turn that produces them and are not carried into the next turn's
-  // context, so they must not be counted as resident. Today that happens for an
-  // accidental reason: Claude Code strips the reasoning text before writing the
-  // transcript — all 4,178 blocks sampled across the corpus have `thinking: ""` — so
-  // `chars` is 0 and the block adds nothing.
+  // THINKING IS COUNTED HERE AND SHOULD NOT BE. Known bug, not a subtlety —
+  // miser-report-z52.3, ranked top of the report epic.
   //
-  // The trap: the empty field looks like a parse bug, and "fixing" it by falling back
-  // to the block's `signature` (352–80,280 chars) would silently start charging
-  // residency for content that is not resident. Do not do that without
-  // miser-report-z52.3, which is measuring where thinking actually dies and whether the
-  // signature itself occupies context.
+  // Thinking tokens are billed as OUTPUT on the turn that produces them and are not
+  // carried into the next turn's context, so they must never be charged full
+  // epoch-length residency. This sum charges every block the same way, thinking
+  // included. It gets the right answer on all 22,505 thinking blocks in the current
+  // corpus only because every one of them is EMPTY — Claude Code strips the reasoning
+  // text for the six models present here, so `chars` is 0 and the block adds nothing.
+  //
+  // That stripping is MODEL-DEPENDENT, not universal. Against a transcript from a
+  // retaining model this silently inflates the arena and mis-assigns band dominance,
+  // with no error and no warning. The correctness is a property of the data we happen
+  // to hold, not of this code.
+  //
+  // Deliberately NOT fixed by dropping `kind === 'thinking'` here: if thinking survives
+  // its own turn's tool-use round trips (open question A on that ticket), the right
+  // model is a lifetime ending at the next user turn — shorter than its epoch, a shape
+  // the arena cannot yet express — and excluding it outright would be right across
+  // turns and wrong within one. Settle the lifetime first.
   for (const c of calls) {
     const chars = c.blocks.reduce((a, b) => a + blockChars(b), 0);
     if (chars > 0)
