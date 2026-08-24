@@ -14,7 +14,7 @@
 // two sides of this reconciliation the same quantity measured two ways.
 
 import type { Arrival, ArrivalSource, Call, Conversation } from './calls.ts';
-import { WRITE_MULTIPLE } from './tokens.ts';
+import { WRITE_MULTIPLE, type Basis } from './tokens.ts';
 
 /** One named group of arrivals attributed to a call, priced as a fresh cache write —
  * which is what every arrival born at a call becomes: content entering the context for
@@ -30,6 +30,17 @@ export interface Cause {
   arrivals: number;
   estTokens: number;
   cost: number;
+  /** Whether `estTokens`/`cost` are exact or estimated — `Size`'s own tag (see
+   * tokens.ts), carried through rather than discarded. A plain `estTokens: number` with
+   * no `basis` would force a future consumer to re-derive "is this bucket exact"
+   * by hardcoding `source === 'assistantOutput'`, the exact per-call-site branching
+   * `Size` exists to eliminate. [LAW:one-source-of-truth]
+   *
+   * Constant per bucket rather than computed per arrival within it: `calls.ts` always
+   * sizes `assistantOutput` with `exactSize` and the other three sources with
+   * `estimatedSize`, so basis is a deterministic function of `source`, never a choice
+   * two arrivals in the same bucket could disagree on. */
+  basis: Basis;
 }
 
 /** One call's estimated causes, and the exact gap between what they explain and what
@@ -38,10 +49,15 @@ export interface Cause {
  * [LAW:types-are-the-program] `unattributed` is a field, not a discipline: `causes` are
  * never adjusted to make it disappear, which is PROJECT.md's honesty rule — exact
  * numbers are authoritative, estimates are labeled and never adjust them — carried in
- * the type rather than trusted to be remembered. Can be negative, when the character
- * estimator overshoots; reported as-is, never clamped, for the same reason `output.ts`'s
- * `Remainder` is not clamped — clamping would bias every rollup upward and hide the
- * estimator's own error. */
+ * the type rather than trusted to be remembered. Can be negative, from either of two
+ * causes, and reported as-is, never clamped, for the same reason `output.ts`'s
+ * `Remainder` is not clamped — clamping would bias every rollup upward and hide which
+ * cause is responsible. One is the character estimator overshooting on the three
+ * chars/4 sources. The other is the exact `assistantOutput` bucket alone overshooting a
+ * small `cacheCreation`: `calls.ts` prices a call's whole output as resident at the next
+ * call by assumption, and on the ~0.22% of boundaries where that assumption doesn't hold
+ * (see the measurement in `calls.ts`), the bucket claims more write cost than this call
+ * actually paid — nothing to do with the estimator at all. */
 export interface CallAttribution {
   call: number;
   causes: Cause[];
@@ -93,7 +109,14 @@ function causesOf(arrivals: readonly Arrival[], toolNameByUseId: ReadonlyMap<str
       existing.estTokens += a.size.tokens;
       existing.cost += cost;
     } else {
-      buckets.set(key, { source: a.source, label, arrivals: 1, estTokens: a.size.tokens, cost });
+      buckets.set(key, {
+        source: a.source,
+        label,
+        arrivals: 1,
+        estTokens: a.size.tokens,
+        cost,
+        basis: a.size.basis,
+      });
     }
   }
   return [...buckets.values()];
