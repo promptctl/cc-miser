@@ -320,34 +320,52 @@ function coverageBar(cov: Coverage): string {
  * appears only when it is bad teaches the reader to read its absence as "fine". */
 /** How much the per-call reconciliation has to say, and what it found.
  *
- * [LAW:types-are-the-program] A three-way status rather than a boolean: `callsChecked
- * === 0` is a distinct state — no predictable calls in this session, so the model made
- * no individual predictions to check — not a degenerate case of "exact". A session
- * where every call opened its own epoch would otherwise print a 0-of-0 match through
- * the same "ok" badge a real reconciliation earns, which is the exact vacuous-match
- * presentation excluding epoch-openers from `exactCalls` was introduced to eliminate —
- * just relocated from a guaranteed N-of-N to a guaranteed 0-of-0. [LAW:no-silent-failure] */
+ * [LAW:types-are-the-program] A four-way status rather than a boolean. `callsChecked
+ * === 0` is a distinct state — no predictable calls, so the model made no individual
+ * predictions to check — not a degenerate case of "exact": a session where every call
+ * opened its own epoch would otherwise print a 0-of-0 match through the same "ok" badge
+ * a real reconciliation earns, the exact vacuous-match presentation excluding
+ * epoch-openers from `exactCalls` was introduced to eliminate, just relocated from a
+ * guaranteed N-of-N to a guaranteed 0-of-0. And `callsChecked === 0` has two distinct
+ * CAUSES that must not share one narration: a root conversation can legitimately make
+ * zero API calls at all (every call delegated to a spawned agent — `rootCalls === 0`),
+ * in which case no call opened or failed to open an epoch, versus a root conversation
+ * with calls where every one of them opened its own epoch (`rootCalls > 0`). Conflating
+ * them would print "every call here opened its own epoch" for a session with no calls
+ * to have done so. [LAW:no-silent-failure] */
 function residencyCheck(cons: Conservation): string {
   const status =
-    cons.callsChecked === 0 ? 'empty' : cons.callsExact === cons.callsChecked ? 'exact' : 'mismatch';
-  const badge = { empty: 'note', exact: 'ok', mismatch: 'warn' }[status];
+    cons.rootCalls === 0
+      ? 'no-calls'
+      : cons.callsChecked === 0
+        ? 'no-predictable'
+        : cons.callsExact === cons.callsChecked
+          ? 'exact'
+          : 'mismatch';
+  const badge = { 'no-calls': 'note', 'no-predictable': 'note', exact: 'ok', mismatch: 'warn' }[status];
   const headline = {
-    empty: 'No predictable calls in this session',
+    'no-calls': 'No root calls in this session',
+    'no-predictable': 'No predictable calls in this session',
     exact: 'Residency reconstruction is exact',
     mismatch: 'Residency reconstruction does not reconcile',
   }[status];
-  const detail =
-    status === 'empty'
-      ? `Every call here opened its own epoch — the cached prefix never survived from one
-         call to the next — so the residency model had no individual prediction to make.
-         The two aggregate routes to total cache-read still agree
+  const reconciliation = `Two independent routes to total cache-read — the API's own
+       reported figure (${n(cons.actualCacheRead)}) and the residency model's prediction
+       (${n(cons.predictedCacheRead)}) — agree on <b>${cons.callsExact} of
+       ${cons.callsChecked}</b> predictable calls individually (epoch-opening calls,
+       which have nothing to predict from, are excluded).`;
+  const detail = {
+    'no-calls': `Every call here was delegated to a spawned agent — the root transcript
+         itself made no API calls, so there is nothing for the residency model to
+         predict or reconcile at this level.`,
+    'no-predictable': `Every call here opened its own epoch — the cached prefix never
+         survived from one call to the next — so the residency model had no individual
+         prediction to make. The two aggregate routes to total cache-read still agree
          (${n(cons.actualCacheRead)} actual vs ${n(cons.predictedCacheRead)} predicted),
-         but that agreement is trivial with nothing to check it against.`
-      : `Two independent routes to total cache-read — the API's own reported figure
-         (${n(cons.actualCacheRead)}) and the residency model's prediction
-         (${n(cons.predictedCacheRead)}) — agree on <b>${cons.callsExact} of
-         ${cons.callsChecked}</b> predictable calls individually (epoch-opening calls,
-         which have nothing to predict from, are excluded).`;
+         but that agreement is trivial with nothing to check it against.`,
+    exact: reconciliation,
+    mismatch: reconciliation,
+  }[status];
   return `<div class="check ${badge}">
     <b>${headline}</b>
     <p>${detail}</p>
