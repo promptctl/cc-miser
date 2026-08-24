@@ -62,7 +62,11 @@ export interface Call {
  * because it is a PARTIAL count that grows as the response streams and only one line
  * carries the finished figure. Taking the first line understated the corpus's output by
  * 9,105,348 tokens — 27.4% of all output ever billed. Every other field
- * (input, cache creation, cache read) genuinely is constant within a group.
+ * (input, cache creation, cache read) genuinely is constant within a group. HISTORICAL:
+ * the token count and percentage are from that original 740-transcript bug discovery and
+ * were not re-verified in the miser-pipeline-sll.6 re-measurement below, which only
+ * re-confirmed the request-group counts — treat them as "what the bug cost when it was
+ * found," not a current fact about this pipeline's output.
  *
  * WHY MAX AND NOT LAST. Both rules agree on every streaming group. They disagree only
  * where a placeholder line carries an all-zero usage block (`service_tier` and
