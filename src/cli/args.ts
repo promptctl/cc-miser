@@ -57,6 +57,17 @@ export type Command =
   | { kind: 'trace'; scope: Scope }
   | { kind: 'report'; scope: Scope; out: string; renderLimit: number };
 
+/** Where `report` writes when nobody says: `./out`, resolved against the CURRENT
+ * DIRECTORY.
+ *
+ * A deliberate change from the script this replaced, which anchored the path to its own
+ * module location and so always wrote `<repo>/out` wherever it was launched from. That
+ * was right for a file you ran with `bun run`, and wrong the moment `package.json` gained
+ * a real `bin`: a globally installed `miser` anchored to its module would write into its
+ * own installation directory — into `node_modules`, or a Homebrew prefix — which is not
+ * somewhere a user can find, reason about, or clean up. Writing relative to where you
+ * invoked it is the contract every other CLI keeps, so it is the one kept here, and the
+ * usage text says relative-to-what rather than leaving it to be discovered. */
 export const DEFAULT_OUT = 'out';
 
 /** What `report` renders when nobody says. The figure the report has always used.
@@ -174,7 +185,7 @@ const FLAGS: Record<string, FlagSpec> = {
   },
   '--out': {
     placeholder: '<dir>',
-    help: ['where report writes its files (report only, default: out)'],
+    help: ['where report writes its files (report only)', 'default: ./out, relative to the current directory'],
     read: (v) => (d) => ({ ...d, out: v }),
   },
 };

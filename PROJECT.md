@@ -199,8 +199,9 @@ A pipeline of five stages, pure after the file reads at the front:
    so re-renders never re-pay.
 5. **render** — pure functions from the tree to the artifacts above.
 
-One command line binds them, and it is the only place in the tool that touches the
-filesystem, the clock or the exit code: `list` for a tab-separated row per session,
+One command line binds them, and it is the only place that reads transcript contents,
+writes artifacts, asks the clock or sets the exit code — the directory walk is its own
+boundary in `discover.ts`: `list` for a tab-separated row per session,
 `trace` for the span tree as JSON, `report` for the HTML. Run `miser help` for the
 options — the usage text is generated from the command table, so this paragraph does
 not restate it and cannot fall out of step with it.

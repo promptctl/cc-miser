@@ -24,7 +24,7 @@ import {
   type Scope,
 } from '../src/cli/args.ts';
 import { COLUMNS, listRow, toTsv } from '../src/cli/list.ts';
-import { EXIT, run, type Streams } from '../src/cli/main.ts';
+import { EXIT, main, run, type Streams } from '../src/cli/main.ts';
 import { SCHEMA, traceFile, traceNode } from '../src/cli/trace.ts';
 import type { SessionSource } from '../src/discover.ts';
 import { analyzeSession } from '../src/session.ts';
@@ -482,5 +482,94 @@ describe('a command run end to end keeps its two streams apart', () => {
     const corpusJson = JSON.parse(readFileSync(join(out, 'corpus.json'), 'utf8'));
     expect(corpusJson.selection.criteria.join(' ')).toContain('project matches /alpha/');
     expect(corpusJson.selection.criteria.join(' ')).toContain('transcript length between');
+  });
+
+  test('a scoped report counts its scope separately from the machine', () => {
+    // The masthead asks "how much of what I asked for did you show me", and it can only
+    // answer that if the scoped count is its own number rather than folded into either
+    // neighbour.
+    const t = rt();
+    const out = join(root, 'report-inscope');
+    run(readArgs(['report', '--projects', root, '--project', 'alpha', '--out', out]), t.rt);
+    const { selection } = JSON.parse(readFileSync(join(out, 'corpus.json'), 'utf8'));
+    expect(selection.discovered).toBe(2);
+    expect(selection.inScope).toBe(1);
+    expect(selection.rendered).toBe(1);
+  });
+
+  test('an unscoped report has nothing to distinguish, and says so', () => {
+    const t = rt();
+    const out = join(root, 'report-unscoped');
+    run(readArgs(['report', '--projects', root, '--out', out]), t.rt);
+    const { selection } = JSON.parse(readFileSync(join(out, 'corpus.json'), 'utf8'));
+    expect(selection.inScope).toBe(selection.discovered);
+  });
+});
+
+describe('the exit codes are the contract they are documented to be', () => {
+  // [LAW:behavior-not-structure] Asserted through `main`, which is what a shell sees.
+  // `run` alone never exercises the mapping from a THROW to a code, so swapping the two
+  // catch arms used to pass every test.
+  const { root, rt } = corpus();
+
+  test('a bad flag is USAGE, and nothing is read or written', () => {
+    const t = rt();
+    expect(main(['list', '--bogus', 'x'], t.rt)).toBe(EXIT.USAGE);
+    expect(t.out()).toBe('');
+    expect(t.err()).toContain('unrecognised argument');
+    // A usage error must not have walked the corpus on its way to failing.
+    expect(t.err()).not.toContain('scanning');
+  });
+
+  test('a misspelled flag in command position is reported as a command', () => {
+    // `miser --hlep` names no command, and the first token IS the command slot — so the
+    // message says so rather than guessing that a flag was intended.
+    const t = rt();
+    expect(main(['--hlep'], t.rt)).toBe(EXIT.USAGE);
+    expect(t.err()).toContain('unrecognised command `--hlep`');
+  });
+
+  test('an unrecognised command is USAGE, not FAILED', () => {
+    const t = rt();
+    expect(main(['stratigraphy'], t.rt)).toBe(EXIT.USAGE);
+  });
+
+  test('a failure reading real input is FAILED, not USAGE', () => {
+    // The command line was valid; the pipeline broke. A script that retries on USAGE and
+    // stops on FAILED can only be written if these stay different numbers.
+    const t = rt();
+    const exploding: Runtime = {
+      ...t.rt,
+      read: () => {
+        throw new Error('transcript is not readable');
+      },
+    };
+    expect(main(['list', '--projects', root], exploding)).toBe(EXIT.FAILED);
+    expect(t.err()).toContain('transcript is not readable');
+  });
+
+  test('a scope that matches nothing is EMPTY, distinct from both', () => {
+    const t = rt();
+    expect(main(['list', '--projects', root, '--session', 'nomatch'], t.rt)).toBe(EXIT.EMPTY);
+  });
+
+  test('help is OK and goes to stdout, because asking is not a mistake', () => {
+    const t = rt();
+    expect(main(['--help'], t.rt)).toBe(EXIT.OK);
+    expect(t.out()).toContain('usage: miser');
+  });
+});
+
+describe('report writes to ./out when nobody says otherwise', () => {
+  test('the default is relative to the current directory, by design', () => {
+    // Documented rather than anchored: a globally installed `miser` anchored to its own
+    // module would write into node_modules. The usage text has to say relative-to-what,
+    // because "default: out" alone does not.
+    expect(DEFAULT_OUT).toBe('out');
+    expect(readArgs(['report']).kind).toBe('report');
+    const c = readArgs(['report']);
+    if (c.kind !== 'report') throw new Error('unreachable');
+    expect(c.out).toBe(DEFAULT_OUT);
+    expect(USAGE).toContain('relative to the current directory');
   });
 });

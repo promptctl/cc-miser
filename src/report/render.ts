@@ -50,11 +50,31 @@ const pct = (v: number): string => `${(v * 100).toFixed(1)}%`;
  * hardcoded as "The whole account" / "Every session" above a filtered sample, which is
  * the one kind of caption error nobody downstream can catch: a reader who has never seen
  * the corpus has nothing to compare the claim against. Derived from `Selection` so the
- * claim cannot outlive the filter that made it true. */
-const framing = (s: Selection): { eyebrow: string; title: string } =>
-  s.rendered === s.discovered
-    ? { eyebrow: 'The whole account', title: 'Every session' }
-    : { eyebrow: 'A sample of the account', title: `${n(s.rendered)} of ${n(s.discovered)} sessions` };
+ * claim cannot outlive the filter that made it true.
+ *
+ * Three outcomes, because a scoped run is a third thing and not a worse version of
+ * either. Counting a deliberate `--project foo` that rendered all three of its three
+ * sessions as "3 of 500" reports arbitrary omission where there was none; calling it
+ * "Every session" claims the machine. So the page names what the count is OF, and the
+ * comparison that decides the words is `rendered` against the scope the reader asked
+ * for. An unscoped run has `inScope === discovered` and reads exactly as it did before
+ * the scope flags existed. */
+const framing = (s: Selection): { eyebrow: string; title: string } => {
+  // Whether a scope was asked for at all decides the NOUN, so an unscoped page still
+  // counts against "the account" and reads exactly as it did before the flags existed.
+  // The denominator is `inScope` either way, because with no scope the two are equal.
+  const scoped = s.inScope !== s.discovered;
+  if (s.rendered === s.discovered) return { eyebrow: 'The whole account', title: 'Every session' };
+  if (s.rendered === s.inScope)
+    return {
+      eyebrow: 'The whole of the scope',
+      title: `every one of ${n(s.inScope)} sessions in scope`,
+    };
+  return {
+    eyebrow: `A sample of the ${scoped ? 'scope' : 'account'}`,
+    title: `${n(s.rendered)} of ${n(s.inScope)} sessions${scoped ? ' in scope' : ''}`,
+  };
+};
 
 const money = (c: Cost): string =>
   c.projection === 'usd' ? `$${c.value.toFixed(2)}` : n(c.value);
@@ -482,7 +502,12 @@ function calibrationTable(cal: Calibration): string {
 const selectionNote = (s: Selection): string => `<section class="panel">
       <h3>What this page covers</h3>
       <p class="lede">${n(s.rendered)} of the ${n(s.discovered)} sessions found under the
-        projects directory. Every figure on this page describes those ${n(s.rendered)}
+        projects directory${
+          // Stated only when the scope actually narrowed, because on an unscoped run
+          // `inScope` and `discovered` are the same number and printing it twice invites
+          // the reader to hunt for a distinction that isn't there.
+          s.inScope === s.discovered ? '' : `, ${n(s.inScope)} of them in the requested scope`
+        }. Every figure on this page describes those ${n(s.rendered)}
         sessions and nothing beyond them.</p>
       <ul class="criteria">${s.criteria.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
     </section>`;

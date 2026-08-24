@@ -102,7 +102,7 @@ describe('a project heading names the project, on a machine nobody here has used
 
   test('no machine-specific string reaches the rendered page', () => {
     const html = renderCorpus(
-      corpusOf([foreignSession()], { discovered: 1, rendered: 1, criteria: [] }),
+      corpusOf([foreignSession()], { discovered: 1, inScope: 1, rendered: 1, criteria: [] }),
     );
     expect(html).toContain('my-project');
     // The slug is a whole filesystem path. It is what the old renderer printed on any
@@ -118,6 +118,7 @@ describe('the page states what it covers', () => {
     const html = renderCorpus(
       corpusOf(sessions, {
         discovered: 271,
+        inScope: 271,
         rendered: 1,
         criteria: ['transcript length between 60 and 700 lines — excluded 180 of 271'],
       }),
@@ -129,14 +130,51 @@ describe('the page states what it covers', () => {
 
   test('the filters that decided the sample are on the page', () => {
     const html = renderCorpus(
-      corpusOf(sessions, { discovered: 271, rendered: 1, criteria: ['excluded 180 of 271'] }),
+      corpusOf(sessions, {
+        discovered: 271,
+        inScope: 271,
+        rendered: 1,
+        criteria: ['excluded 180 of 271'],
+      }),
     );
     expect(html).toContain('excluded 180 of 271');
   });
 
+  test('a scoped run that rendered all of its scope is not called a sample', () => {
+    // `--project foo` on a 500-session machine where all 3 foo sessions render: the page
+    // showed everything it was asked for, and calling that "3 of 500" reports arbitrary
+    // omission that did not happen.
+    const html = renderCorpus(
+      corpusOf(sessions, { discovered: 500, inScope: 3, rendered: 3, criteria: ['project foo'] }),
+    );
+    expect(html).not.toContain('A sample of the scope');
+    expect(html).toContain('The whole of the scope');
+    // ...and it must not claim the machine either, having shown 3 of its 500.
+    expect(html).not.toContain('The whole account');
+    expect(html).not.toContain('Every session</');
+  });
+
+  test('a scoped run counts its sample against the scope, not the machine', () => {
+    const html = renderCorpus(
+      corpusOf(sessions, { discovered: 500, inScope: 20, rendered: 3, criteria: ['project foo'] }),
+    );
+    expect(html).toContain('3 of 20 sessions in scope');
+    expect(html).not.toContain('3 of 500 sessions');
+  });
+
+  test('a scoped page still states what the machine held', () => {
+    // The scope narrowing must not cost the reader the denominator that says how much of
+    // the machine they are NOT looking at.
+    const html = renderCorpus(
+      corpusOf(sessions, { discovered: 500, inScope: 20, rendered: 3, criteria: ['project foo'] }),
+    );
+    expect(html).toContain('500 sessions found under the');
+    expect(html).toContain('20 of them in the requested scope');
+  });
+
   test('a page that really did cover everything may still say so', () => {
     const html = renderCorpus(
-      corpusOf(sessions, { discovered: 1, rendered: 1, criteria: [] }),
+      corpusOf(sessions, { discovered: 1, inScope: 1, rendered: 1, criteria: [] }),
     );
     expect(html).toContain('Every session');
     expect(html).toContain('The whole account');

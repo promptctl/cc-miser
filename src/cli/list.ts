@@ -73,6 +73,19 @@ export const COLUMNS = [
   'unpricedTokEq',
 ] as const satisfies readonly (keyof ListRow)[];
 
+/** Every field of `ListRow` appears in `COLUMNS` — the direction `satisfies` does not
+ * check.
+ *
+ * [LAW:types-are-the-program] `satisfies readonly (keyof ListRow)[]` proves only that
+ * every column is a real field. Adding a field to `ListRow` and forgetting the column
+ * would compile, and the field would silently never reach the header or the rows — a
+ * column that is absent looks exactly like a column whose value was always zero, which
+ * is the answer-shaped void this file warns about for `usd` and `unpricedTokEq`. This
+ * asserts the containment the other way, so a missing column fails the build instead of
+ * quietly dropping data. */
+type MissingColumn = Exclude<keyof ListRow, (typeof COLUMNS)[number]>;
+const _everyFieldIsAColumn: MissingColumn extends never ? true : MissingColumn = true;
+
 /** Tab-separated, header first.
  *
  * WHY ONE FORMAT AND NOT A `--json` FLAG. Tabs are already both: `cut -f8`, `sort -k8n`

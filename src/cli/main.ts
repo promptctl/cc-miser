@@ -4,13 +4,18 @@
 // kernel has no interpreter to hand the file to and the installed command fails. The
 // `scripts` entries hid that, because `bun run <file>` supplies the interpreter itself.
 //
-// The command driver: the one place in this tool that touches the filesystem, the
-// clock, the environment, or the process exit code.
+// The command driver: the one place that reads transcript CONTENTS, writes artifacts,
+// asks the clock and sets the process exit code.
 //
-// [LAW:effects-at-boundaries] Everything above this file is a pure function of the text
-// it is handed. `readText` is the only reader, `writeFileSync` the only writer, and the
-// two stream writers below are the only output. That is what lets the whole pipeline be
-// exercised on fixtures with no filesystem at all.
+// [LAW:effects-at-boundaries] Not the only module that touches the filesystem, and the
+// claim is worth stating precisely because the imprecise version invites someone to add
+// a raw `readFileSync` here on the belief that fs calls are centralised in this file.
+// `discover.ts` is its own established boundary — it owns the directory walk, and says
+// so in its own header — and this file reaches the filesystem THROUGH it rather than
+// instead of it. What this file owns is the rest: `readText` is the only reader of
+// transcript text, `writeFileSync` the only writer, and the two stream writers below the
+// only output. Everything above those is a pure function of the text it is handed, which
+// is what lets the whole pipeline be exercised on fixtures.
 //
 // THE OUTPUT CONTRACT, which the ticket asks be decided deliberately rather than
 // discovered:
@@ -166,6 +171,9 @@ export function run(command: Command, rt: Runtime): number {
       }
       const selection: Selection = {
         discovered: sources.length,
+        // What the scope flags kept. Equal to `discovered` when none were given, so an
+        // unscoped run frames itself exactly as it did before the flags existed.
+        inScope: picked.length,
         rendered: chosen.picked.length,
         // The page states its own scale from ONE list, so the scope a person typed and
         // the heuristic the report applies are both on it. [LAW:one-source-of-truth]
@@ -210,27 +218,28 @@ export function run(command: Command, rt: Runtime): number {
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-function main(): number {
-  const streams: Streams = {
-    out: (t) => process.stdout.write(t),
-    err: (t) => process.stderr.write(t),
-  };
-
+/** Parse, run, and turn either failure into its own exit code.
+ *
+ * [LAW:effects-at-boundaries] Takes `argv` and the `Runtime` rather than reaching for
+ * `process.argv`, `process.env` and `Date.now()` itself, so the exit-code contract this
+ * file declares can be exercised by a test instead of asserted in a comment. The three
+ * ambient reads live on the `import.meta.main` line below — the actual edge. */
+export function main(argv: readonly string[], rt: Runtime): number {
   // Parsed in its own try, so a bad command line exits USAGE and a failure during the
   // run exits FAILED. Collapsing them would tell a script that a corrupt transcript was
   // a typo. [LAW:no-silent-failure]
   let command: Command;
   try {
-    command = readArgs(process.argv.slice(2));
+    command = readArgs(argv);
   } catch (e) {
-    streams.err(`${message(e)}\n`);
+    rt.streams.err(`${message(e)}\n`);
     return EXIT.USAGE;
   }
 
   try {
-    return run(command, { env: process.env, streams, now: Date.now(), read: readText });
+    return run(command, rt);
   } catch (e) {
-    streams.err(`${message(e)}\n`);
+    rt.streams.err(`${message(e)}\n`);
     return EXIT.FAILED;
   }
 }
@@ -238,6 +247,14 @@ function main(): number {
 // `import.meta.main` is false when a test imports `run` above, so importing this module
 // never runs a corpus scan as a side effect — the exact trap `src/report/args.ts` was
 // carved out of `generate.ts` to escape.
-if (import.meta.main) process.exit(main());
+if (import.meta.main)
+  process.exit(
+    main(process.argv.slice(2), {
+      env: process.env,
+      streams: { out: (t) => process.stdout.write(t), err: (t) => process.stderr.write(t) },
+      now: Date.now(),
+      read: readText,
+    }),
+  );
 
 export { USAGE };
