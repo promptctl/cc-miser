@@ -77,21 +77,33 @@ export interface ConservationCheck {
  *
  * Two independent routes to one quantity, both built only from exact API numbers.
  * Route A sums the reported `cache_read`. Route B predicts it from the residency
- * model: everything written at call i is re-read by every later call in i's epoch. If
- * the model is right they agree; the gap measures what the model fails to explain, and
- * is reported rather than hidden. [LAW:no-silent-failure]
+ * model: an epoch opens on whatever prefix survived into it, and everything written at
+ * call i is re-read by every later call in i's epoch. If the model is right they agree;
+ * the gap measures what the model fails to explain, and is reported rather than hidden.
+ * [LAW:no-silent-failure]
  *
- * The PER-CALL result is the real evidence. Aggregate agreement is weak — two wrong
- * numbers can cancel across 28 calls — so the strong claim is that EVERY call's
- * cache_read equals the sum of every earlier cache_creation in its epoch. It held on
- * 28 of 28 calls of the hand-traced specimen, which is why residency-derived numbers
- * are allowed downstream at all. */
+ * THE BASE TERM IS NOT OPTIONAL, and leaving it out is the most expensive thing this
+ * file has done. The model previously predicted a call's `cache_read` from prior
+ * cache_creation ALONE, which is the same equation with `cache_read(epochStart)` assumed
+ * to be zero. It recorded, as its licence for every residency-derived number downstream,
+ * that it "held on 28 of 28 calls of the hand-traced specimen" — and it did, because that
+ * specimen opened cold. Corpus-wide it holds on 26.2% of 47,782 calls; 56.3% of epochs
+ * open on a prefix that survived, and for each of those the prediction was short by the
+ * whole surviving prefix, on every call in the epoch. Restoring the base term takes it to
+ * 84.6%. A theorem checked on the one specimen that cannot disprove it is not checked.
+ *
+ * WHAT THE REMAINING 15% IS. The per-call form is cumulative: one bad boundary poisons
+ * every later call in its epoch. Stated LOCALLY instead — each call's `cache_read` equals
+ * the previous call's `cache_read` plus what the previous call wrote — the same model
+ * holds on 99.15% of 46,462 boundaries. `src/invariants.ts` checks the local form for
+ * exactly that reason: it names the one boundary that broke rather than the fifty calls
+ * downstream of it. */
 export function conservation(calls: readonly Call[], r: Residency): ConservationCheck {
   const perCall = calls.map((c) => {
     const e = r.epochs[r.epochOfCall[c.index]!]!;
-    const expected = calls
-      .slice(e.start, c.index)
-      .reduce((a, prior) => a + prior.usage.cacheCreation, 0);
+    const expected =
+      calls[e.start]!.usage.cacheRead +
+      calls.slice(e.start, c.index).reduce((a, prior) => a + prior.usage.cacheCreation, 0);
     return {
       call: c.index,
       expected,
@@ -101,18 +113,15 @@ export function conservation(calls: readonly Call[], r: Residency): Conservation
   });
   return {
     actualCacheRead: calls.reduce((a, c) => a + c.usage.cacheRead, 0),
-    predictedCacheRead: calls.reduce(
-      (a, c) => a + c.usage.cacheCreation * readsAfter(c.index, r),
-      0,
-    ),
+    // [LAW:one-source-of-truth] Summed from `perCall` rather than derived a second way
+    // from the epoch spans. The two were independent expressions of one model, free to
+    // disagree about it — and they did, the moment the base term was added to one of
+    // them. The aggregate is a projection of the per-call result, so it cannot drift.
+    predictedCacheRead: perCall.reduce((a, p) => a + p.expected, 0),
     perCall,
     exactCalls: perCall.filter((p) => p.delta === 0).length,
   };
 }
-
-/** How many later calls re-read what was written at `callIndex`. */
-const readsAfter = (callIndex: number, r: Residency): number =>
-  r.epochs[r.epochOfCall[callIndex]!]!.end - callIndex;
 
 /** True cost of one arrival over its whole life — the number naive accounting misses.
  *

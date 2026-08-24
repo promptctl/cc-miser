@@ -27,6 +27,23 @@ export interface Call {
   ts: number;
   model: string;
   usage: Usage;
+  /** The usage snapshot the group's LAST line carried — the rule `completeUsage`
+   * REJECTED, kept so the rule it chose can be checked instead of trusted.
+   *
+   * Deliberately order-dependent, which is the whole reason it is a useful rival: `max`
+   * is a property of the SET of lines and `last` is a property of their sequence, so the
+   * two are computed from genuinely different things and cannot agree by construction.
+   * They agree on all 5,395 streaming groups and part company only where a placeholder
+   * line carries an all-zero block. That gap is what `src/invariants.ts` watches: the
+   * first-line reader that shipped understated the corpus's output by 27.4%, and nothing
+   * in this suite could see it, because the only figure kept was the one it produced.
+   * [LAW:no-silent-failure] */
+  lastLineUsage: Usage;
+  /** Cache-creation tokens the adopted snapshot's own per-TTL breakdown reported and its
+   * flat total did not account for. Zero everywhere in the corpus; non-zero means the one
+   * figure this pipeline costs cache writes from has stopped totalling the tiers beside
+   * it. See `ParsedUsage` in `records.ts`. */
+  unaccountedCacheCreation: number;
   blocks: ContentBlock[];
 }
 
@@ -42,16 +59,36 @@ export interface Call {
  * 9,105,348 tokens — 27.4% of all output ever billed. Every other field
  * (input, cache creation, cache read) genuinely is constant within a group.
  *
- * WHY MAX AND NOT LAST. Both rules agree on all 5,395 streaming groups. They disagree on
- * three, where a placeholder line carries an all-zero usage block (`service_tier` and
+ * WHY MAX AND NOT LAST. Both rules agree on every streaming group. They disagree only
+ * where a placeholder line carries an all-zero usage block (`service_tier` and
  * `iterations` both null) beside the real one: "last" would adopt the zeros and throw
  * away a real call's entire cost. Max is also a property of the SET of lines rather than
  * of the order they were appended in. [LAW:no-ambient-temporal-coupling]
  *
+ * Re-measured for miser-pipeline-sll.6 across all 943 transcripts, because the counts
+ * this comment used to state were taken when the corpus was smaller and had quietly gone
+ * stale: of 48,155 request groups, 5,449 stream and would be understated by a first-line
+ * reader, 53 carry a placeholder tail, and ZERO disagree for any other reason. The last
+ * of those three figures is the one that matters — it is what makes the disagreement
+ * fully characterised rather than merely small — and `src/invariants.ts` now holds the
+ * two rules against each other on every run instead of trusting this paragraph.
+ *
  * The greatest output wins the WHOLE snapshot, never field-by-field: a per-field maximum
  * could assemble a usage vector that no line ever reported, which is a number with no
  * source. [LAW:one-source-of-truth] */
-const completeUsage = (a: Usage, b: Usage): Usage => (b.output > a.output ? b : a);
+const completeUsage = (a: UsageSnapshot, b: UsageSnapshot): UsageSnapshot =>
+  b.usage.output > a.usage.output ? b : a;
+
+/** What one JSONL line of a request group claims the call cost, and how completely that
+ * claim accounts for itself.
+ *
+ * The two travel together so the dedup rule chooses between whole snapshots. Reading
+ * `unaccountedCacheCreation` off some other line of the group than the one whose usage
+ * was adopted would report the completeness of a figure nobody used. */
+interface UsageSnapshot {
+  usage: Usage;
+  unaccountedCacheCreation: number;
+}
 
 /** Something that entered the context window between two calls. */
 export interface Arrival {
@@ -258,14 +295,21 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
           ts: line.ts,
           model: line.model,
           usage: line.usage,
+          lastLineUsage: line.usage,
+          unaccountedCacheCreation: line.unaccountedCacheCreation,
           blocks: [],
         };
         byRequest.set(line.requestId, call);
+        // Assigned on every line of the group, so the one still standing when the group
+        // ends is the last line's — the rival rule, recorded rather than recomputed.
+        call.lastLineUsage = line.usage;
         // [LAW:dataflow-not-control-flow] The fold runs on EVERY line of the group,
         // including the one that created the call — where it is a no-op against itself.
         // The previous version ran it on no line at all, taking whichever usage the
         // first line happened to carry.
-        call.usage = completeUsage(call.usage, line.usage);
+        const chosen = completeUsage(call, line);
+        call.usage = chosen.usage;
+        call.unaccountedCacheCreation = chosen.unaccountedCacheCreation;
         call.lineCount++;
         for (const block of line.blocks) {
           call.blocks.push(block); // unioned across the whole request group

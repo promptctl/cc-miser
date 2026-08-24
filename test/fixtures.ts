@@ -273,11 +273,11 @@ and leave the illegal state representable.`.repeat(4);
 
 /** A request group whose SECOND line carries an all-zero usage block beside a real one.
  *
- * Three groups in the corpus have this shape — every field zero, with `service_tier` and
- * `iterations` null, which is a placeholder the writer emitted rather than anything the
- * API measured. It is the one case that separates "take the last line" from "take the
- * completed one": a last-wins reader adopts the zeros and silently discards a real
- * call's entire cost. */
+ * 53 groups of the corpus's 48,155 have this shape — every field zero, with
+ * `service_tier` and `iterations` null, which is a placeholder the writer emitted rather
+ * than anything the API measured. It is the one case that separates "take the last line"
+ * from "take the completed one": a last-wins reader adopts the zeros and silently
+ * discards a real call's entire cost. */
 export const placeholderTailSession = (): string =>
   [
     line({
@@ -326,6 +326,52 @@ export const placeholderTailSession = (): string =>
         content: [{ type: 'text', text: 'Done.' }],
       },
     }),
+  ].join('\n') + '\n';
+
+/** A one-call transcript whose request group's usage blocks are written VERBATIM.
+ *
+ * `buildTranscript` synthesizes a plausible streaming ramp across a group's lines, which
+ * is the right model for a conversation and the wrong one for a test whose subject IS the
+ * usage block. The shapes that matter to the conservation identities are exactly the ones
+ * that ramp cannot produce: a per-TTL breakdown that disagrees with its own flat total, or
+ * a final line reporting less than the peak without being the all-zero placeholder.
+ *
+ * [LAW:one-type-per-behavior] `placeholderTailSession` above is the first of these,
+ * written out by hand. This is the same thing with the usage blocks lifted into a
+ * parameter, so the next adversarial shape is DATA rather than a fourth hand-written
+ * transcript — and `placeholderTailSession` keeps its own name because what it models is
+ * a specific observed corpus shape, not an arbitrary one. */
+export const usageBlockSession = (
+  usages: readonly Record<string, unknown>[],
+  sessionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+): string =>
+  [
+    line({
+      type: 'user',
+      uuid: 'q0001',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      sessionId,
+      cwd: FOREIGN_CWD,
+      message: { role: 'user', content: 'do the thing' },
+    }),
+    ...usages.map((usage, k) =>
+      line({
+        type: 'assistant',
+        uuid: `q${String(k + 2).padStart(4, '0')}`,
+        timestamp: `2026-01-01T00:01:${String(k).padStart(2, '0')}.000Z`,
+        sessionId,
+        cwd: FOREIGN_CWD,
+        // One requestId across every block: these are the lines of ONE call, which is
+        // what makes them a dedup decision rather than a sequence of calls.
+        requestId: 'req_usage',
+        message: {
+          role: 'assistant',
+          model: 'claude-opus-5',
+          usage,
+          content: [{ type: 'text', text: `part ${k}` }],
+        },
+      }),
+    ),
   ].join('\n') + '\n';
 
 // ---------------------------------------------------------------------------------

@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test, describe } from 'bun:test';
 import { discoverSessions, projectsRoot, type SessionSource } from '../src/discover.ts';
+import { auditCorpus, describeAudit } from '../src/invariants.ts';
 import { depthOf } from '../src/lineage.ts';
 import { analyzeSession, type AnalyzedSession } from '../src/session.ts';
 import { allCalls, rollup } from '../src/spans.ts';
@@ -116,6 +117,31 @@ describe.skipIf(choice.kind === 'skip')('the pipeline survives a real corpus', (
       return inTree.length !== expectedCalls || new Set(inTree.map((c) => c.id)).size !== inTree.length;
     });
     expect(wrong.map((s) => s.source.sessionId)).toEqual([]);
+  });
+
+  test('every conservation identity holds across the whole corpus', () => {
+    // WHAT THIS ADDS to the structural claims above. Those ask whether the pipeline's
+    // parts agree about SHAPE — that a call is in the tree exactly once, that a label
+    // exists for it. These ask whether they agree about NUMBERS, and two of them close
+    // against figures the pipeline never derived: the per-TTL cache-creation breakdown in
+    // the same API usage block, and the cache_read of the call before. An identity that
+    // only checks this pipeline against another computation of this pipeline cannot catch
+    // a wrong belief they share, and this project has already paid for that lesson once.
+    //
+    // Each identity carries its own tolerance and the measurement behind it, so a row
+    // stating a law and a row stating a regularity are asserted by the same expression.
+    // [LAW:dataflow-not-control-flow]
+    const audits = auditCorpus(scanned);
+    for (const a of audits) console.log(describeAudit(a));
+    expect(audits.filter((a) => !a.held).map((a) => a.identity.name)).toEqual([]);
+  });
+
+  test('the identities actually ran — a check that produced no sites certified nothing', () => {
+    // [LAW:no-silent-failure] A corpus that somehow yielded no claims would make every
+    // identity above pass vacuously, reporting success for work that never happened. The
+    // scan is only evidence if the identities had something to examine.
+    const empty = auditCorpus(scanned).filter((a) => a.sites === 0);
+    expect(empty.map((a) => a.identity.name)).toEqual([]);
   });
 
   test('no session bills negative tokens', () => {
