@@ -31,10 +31,21 @@
 //     and cache-read-recurrence close against figures neither this pipeline nor a rival
 //     implementation of it derived — the two independent oracles over corpus-wide
 //     conservation that used to be missing (miser-pipeline-sll.6).
+//   test/attribution.test.ts            Attribution beneath a call (miser-pipeline-sll.3):
+//     causes bucketed by source and label, priced as fresh writes, reconciled against
+//     input + cacheCreation with an explicit unattributed remainder. corpus-smoke.test.ts
+//     closes the identity — causedCost + unattributed === exactCost — over every call of
+//     every ROOT or PLACED conversation on disk. A conversation the spawn resolver
+//     orphans is excluded: `Orphan` (src/forest.ts) carries no `Conversation` to attribute
+//     — the same gap `notesFor` surfaces as "ORPHAN subagent ... why" on the page.
 //
-// STILL UNVERIFIED: the attribution beneath a call (miser-pipeline-sll.3). The estimator
-// that turns characters into input-side tokens has no measured error bar at all —
-// `estimateTokens` says so at its definition.
+// STILL UNVERIFIED: the estimator that turns characters into input-side tokens has no
+// measured error bar at all — `estimateTokens` says so at its definition. Attribution
+// prices its `userText`/`attachment`/`toolResult` causes with it, so those buckets'
+// `estTokens` and `cost` inherit that uncertainty; `assistantOutput` ("prior output") is
+// priced from the call's own billed `output_tokens` and is exact, same as `unattributed`
+// and `exactCost` — `Cause.basis` says which is which per bucket rather than leaving a
+// reader to assume from the source name.
 //
 // Said here rather than left implied: a repo that quietly stops verifying itself is
 // worse off than one that never claimed to. The reason this list is worth keeping true
