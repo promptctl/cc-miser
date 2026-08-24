@@ -39,6 +39,16 @@ export interface Call {
    * in this suite could see it, because the only figure kept was the one it produced.
    * [LAW:no-silent-failure] */
   lastLineUsage: Usage;
+  /** Whether `output` differed across ANY two of this group's lines. Most multi-line
+   * groups are multi-BLOCK, not multi-VALUE: a turn with a thinking block, a tool_use,
+   * and a text block is three lines, but the API often reports the same finished output
+   * count on all three rather than a growing one — so `lineCount > 1` alone is a much
+   * broader, weaker population than groups where `usage`/`lastLineUsage` were ever
+   * genuinely at risk of disagreeing. Measured over this corpus's assistant lines: of
+   * ~35,000 multi-line request groups, only a small minority actually have output that
+   * varies across their lines — most are flat, and MAX vs LAST agrees on a flat sequence
+   * by construction regardless of which line either rule would have picked. */
+  outputVaries: boolean;
   /** Cache-creation tokens the adopted snapshot's own per-TTL breakdown reported and its
    * flat total did not account for. Zero everywhere in the corpus; non-zero means the one
    * figure this pipeline costs cache writes from has stopped totalling the tiers beside
@@ -306,11 +316,17 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
           model: line.model,
           usage: line.usage,
           lastLineUsage: line.usage,
+          outputVaries: false,
           unaccountedCacheCreation: line.unaccountedCacheCreation,
           hasCacheCreationBreakdown: line.hasCacheCreationBreakdown,
           blocks: [],
         };
         byRequest.set(line.requestId, call);
+        // Compared against the PREVIOUS line's output before lastLineUsage is overwritten
+        // below — `call.lineCount` is still last iteration's count here, so this is a
+        // no-op against itself on the line that created the call and a real adjacent
+        // comparison on every line after.
+        if (call.lineCount > 0 && call.lastLineUsage.output !== line.usage.output) call.outputVaries = true;
         // Assigned on every line of the group, so the one still standing when the group
         // ends is the last line's — the rival rule, recorded rather than recomputed.
         call.lastLineUsage = line.usage;

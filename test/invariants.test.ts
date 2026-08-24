@@ -386,6 +386,23 @@ describe('output-snapshot-agrees — the guard on the quantity that was wrong by
     expect(s.conversation.calls[0]!.lineCount).toBe(1);
     expect(auditOne('output-snapshot-agrees', s).sites).toBe(0);
   });
+
+  test('a multi-line group with CONSTANT output is not a site either', () => {
+    // lineCount > 1 alone would wrongly count this: three lines, but output never
+    // changes across them (a thinking/tool_use/text turn that reports the same finished
+    // count on every block), so MAX and LAST agree the same way a single-line group's
+    // do — by construction, not by being independent rules that happened to concur.
+    const s = analyzed(
+      usageBlockSession([
+        { input_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 50 },
+        { input_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 50 },
+        { input_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 50 },
+      ]),
+    );
+    expect(s.conversation.calls[0]!.lineCount).toBe(3);
+    expect(s.conversation.calls[0]!.outputVaries).toBe(false);
+    expect(auditOne('output-snapshot-agrees', s).sites).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------------

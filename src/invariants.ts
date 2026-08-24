@@ -115,9 +115,9 @@ const cacheSurvivingBoundaries = (conv: Conversation): Array<{ i: number; a: Cal
     .map((a, i) => ({ i, a, b: conv.calls[i + 1]! }))
     .filter(({ a, b }) => b.usage.cacheRead >= a.usage.cacheRead);
 
-/** Request groups whose last line carried a real usage block AND were actually a
- * multi-line group — i.e. groups where `usage` and `lastLineUsage` are genuinely two
- * different reads rather than the same line read twice.
+/** Request groups whose last line carried a real usage block AND whose output actually
+ * varied across the group's lines — i.e. groups where `usage` and `lastLineUsage` are
+ * genuinely two different reads rather than the same value read twice.
  *
  * The groups whose final line is an all-zero placeholder — every usage field zero, with
  * `service_tier` and `iterations` both null — are excluded, because there the rival rule
@@ -130,18 +130,19 @@ const cacheSurvivingBoundaries = (conv: Conversation): Array<{ i: number; a: Cal
  * placeholder is being quietly forgiven, which is the only thing that makes the identity
  * below evidence rather than a formality.
  *
- * `lineCount > 1` is the SECOND exclusion, and is what makes "evidence" true rather than
- * mostly-formality: for a single-line group, `call.usage` and `call.lastLineUsage` are
- * both set from that one line (calls.ts's fold), so `completeUsage(call, line)` compares
- * a value against itself and the two routes agree by construction — not because MAX and
- * LAST are independent rules that happened to concur, but because there was only ever one
- * reading. Counting those as sites would be the same vacuous-match inflation excluded
- * elsewhere in this file (`groupsWithCacheCreationBreakdown`, and `predictable` in
- * `residency.ts`). Only the 5,449 multi-line/streaming groups are a genuine test of MAX
- * vs LAST; single-line groups are majority of this identity's sites but demonstrate
- * nothing about that independence. [LAW:no-silent-failure] */
+ * `outputVaries` is the SECOND exclusion, and is what makes "evidence" true rather than
+ * mostly-formality. `lineCount > 1` alone is NOT enough: most multi-line groups are
+ * multi-BLOCK, not multi-VALUE — a turn with a thinking block, a tool_use, and a text
+ * block is three lines, but the API commonly reports the same finished output count on
+ * every one of them rather than a growing figure. For those, `usage` and `lastLineUsage`
+ * agree by construction (a flat sequence's max equals its last element regardless of
+ * which rule either side used), the same vacuous-match inflation excluded elsewhere in
+ * this file (`groupsWithCacheCreationBreakdown`, and `predictable` in `residency.ts`).
+ * Only a group whose output genuinely changes across its lines gives MAX and LAST
+ * anything to disagree about, which is what makes their agreement there real evidence
+ * rather than arithmetic. [LAW:no-silent-failure] */
 const groupsWithRealLastLine = (conv: Conversation): Call[] =>
-  conv.calls.filter((c) => c.lineCount > 1 && USAGE_COMPONENTS.some((k) => c.lastLineUsage[k] !== 0));
+  conv.calls.filter((c) => c.outputVaries && USAGE_COMPONENTS.some((k) => c.lastLineUsage[k] !== 0));
 
 /** Calls whose adopted line's usage block carried a `cache_creation` breakdown.
  *
@@ -237,21 +238,26 @@ export const IDENTITIES: readonly Identity[] = [
       'the output figure adopted for a request group equals the one its last line ' +
       'reported',
     basis:
-      'MEASURED: exact on 35,102 of 35,102 sites, restricted to MULTI-line request ' +
-      'groups (`lineCount > 1`). A single-line group has `usage` and `lastLineUsage` set ' +
-      'from that one line by construction (calls.ts), so MAX and LAST are not independent ' +
-      'there — they read the same line twice and agree trivially; counting those as sites ' +
-      'would be the same vacuous-match inflation excluded elsewhere in this file. This is ' +
-      'the OUTPUT-side guard, and output is precisely the quantity that was wrong by ' +
-      '27.4%. `completeUsage` picks one snapshot per group by MAX, a property of the set ' +
-      'of lines; the last line is an independent rule over the same raw data, a property ' +
-      'of their order — genuinely independent only when there is more than one line to ' +
-      'disagree. A revert to the first-line reader fails this row on the 5,449 groups ' +
-      "whose output streams — the exact bug, caught at the exact site. The known " +
-      'disagreements are the all-zero placeholder tails, which are excluded from being ' +
-      'sites at all. The rate is not zero only because a partial placeholder — a tail ' +
-      'zeroed in `output` but not in every field — would slip that exclusion on a corpus ' +
-      'we have not seen; at 0.1% it still admits nothing systematic.',
+      'MEASURED: exact on 5,451 of 5,451 sites, restricted to groups whose OUTPUT ' +
+      'ACTUALLY VARIED across their lines (`Call.outputVaries`) — closely matching the ' +
+      '5,449 streaming groups calls.ts independently derives from raw request-group ' +
+      'counts, which is itself a cross-check that this population is the right one. ' +
+      '`lineCount > 1` alone is NOT the right filter: most multi-line groups are ' +
+      'multi-BLOCK, not multi-VALUE (a thinking block, a tool_use, and a text block are ' +
+      'three lines that commonly report the same finished output count on all three), ' +
+      'and for a flat sequence MAX and LAST agree by construction regardless of which ' +
+      'line either rule picked — a vacuous-match inflation an earlier version of this ' +
+      'basis had (35,102 "sites", the great majority contributing nothing). This is the ' +
+      'OUTPUT-side guard, and output is precisely the quantity that was wrong by 27.4%. ' +
+      '`completeUsage` picks one snapshot per group by MAX, a property of the set of ' +
+      'lines; the last line is an independent rule over the same raw data, a property of ' +
+      'their order — genuinely independent only when the lines disagree with each other ' +
+      'in the first place. A revert to the first-line reader fails this row on every one ' +
+      'of these sites — the exact bug, caught at the exact site. The known disagreements ' +
+      'are the all-zero placeholder tails, which are excluded from being sites at all. ' +
+      'The rate is not zero only because a partial placeholder — a tail zeroed in ' +
+      '`output` but not in every field — would slip that exclusion on a corpus we have ' +
+      'not seen; at 0.1% it still admits nothing systematic.',
     maxViolationRate: 0.001,
     claims: (s) =>
       conversationsOf(s).flatMap(({ what, conv }) =>
