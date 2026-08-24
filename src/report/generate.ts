@@ -137,7 +137,12 @@ export function select(
     // line are different facts, and only one of them is evidence the filter is idle.
     criteria: [
       `transcript length between ${MIN_LINES} and ${MAX_LINES} lines — excluded ` +
-        `${sources.length - sized.length} of ${sources.length} discovered sessions, ` +
+        // "in-scope", not "discovered": `select` used to be handed the whole corpus, but
+        // the CLI now hands it the sessions `--project`/`--session`/`--since` already
+        // kept, so a denominator called "discovered" would count the filtered set while
+        // naming the machine's. The word has to be true for every caller, not just the
+        // one that existed first. [LAW:one-source-of-truth]
+        `${sources.length - sized.length} of ${sources.length} in-scope sessions, ` +
         `among them every session longer than ${MAX_LINES} lines, which are the ` +
         `expensive ones`,
       `at most ${PER_PROJECT} sessions per project — excluded ${cappedOut} more`,

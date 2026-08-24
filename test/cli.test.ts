@@ -18,6 +18,7 @@ import {
   COMMAND_NAMES,
   DEFAULT_OUT,
   DEFAULT_RENDER_LIMIT,
+  USAGE,
   applyScope,
   readArgs,
   type Scope,
@@ -69,6 +70,34 @@ describe('a command line is parsed into the one command it names', () => {
 
   test('help takes no options, so a flag on it is still a usage error', () => {
     expect(() => readArgs(['help', '--limit', '3'])).toThrow(/not an option of `help`/);
+  });
+
+  test('a name inherited from Object.prototype is not a command', () => {
+    // `COMMANDS` used to be read as an object literal, so `COMMANDS['constructor']`
+    // answered the `Object` constructor — truthy, past the "unrecognised" check, and
+    // dead on `command.build is not a function`. The contract is that every name that
+    // is not a command is refused the same way, whatever `Object.prototype` calls it.
+    for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty'])
+      expect(() => readArgs([name])).toThrow(/unrecognised command/);
+  });
+
+  test('an inherited name is not an option either', () => {
+    expect(() => readArgs(['list', 'constructor', 'x'])).toThrow(/unrecognised argument/);
+  });
+
+  test('the usage text lists every command and every option that exists', () => {
+    // The guarantee PROJECT.md makes: the usage text is generated from the command
+    // table, so a new row cannot leave it stale. Asserted on the observable text rather
+    // than on how it is built. [LAW:behavior-not-structure]
+    for (const name of COMMAND_NAMES) expect(USAGE).toContain(name);
+    for (const flag of ['--projects', '--project', '--session', '--since', '--limit', '--out'])
+      expect(USAGE).toContain(flag);
+  });
+
+  test('the usage text says how report reads --limit differently', () => {
+    // `--limit` means "the N most recent" on list and trace, and something else on
+    // report. A help text that states only the first is wrong for one of three commands.
+    expect(USAGE).toMatch(/--limit caps what is RENDERED/);
   });
 
   test('no command at all is a usage error, not a default', () => {

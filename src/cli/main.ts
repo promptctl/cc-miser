@@ -1,3 +1,9 @@
+#!/usr/bin/env bun
+// The `bin.miser` entry in package.json points here, and an installed or linked `bin` is
+// exec'd by the OS directly rather than through `bun run` — so without this line the
+// kernel has no interpreter to hand the file to and the installed command fails. The
+// `scripts` entries hid that, because `bun run <file>` supplies the interpreter itself.
+//
 // The command driver: the one place in this tool that touches the filesystem, the
 // clock, the environment, or the process exit code.
 //

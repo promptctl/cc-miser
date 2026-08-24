@@ -14,23 +14,6 @@
 
 import { byProject, since as modifiedSince, type SessionSource } from '../discover.ts';
 
-export const USAGE = `usage: miser <command> [options]
-
-commands:
-  help      this text
-  list      one row per in-scope session, tab-separated, on stdout
-  trace     the span tree of every in-scope session, as JSON, on stdout
-  report    the HTML report and corpus.json, written into --out
-
-options:
-  --projects <dir>      the Claude Code projects directory to scan
-                        (default: this machine's ~/.claude/projects)
-  --project <regex>     keep sessions whose project directory matches
-  --session <prefix>    keep sessions whose id starts with this
-  --since <YYYY-MM-DD>  keep sessions modified on or after this date
-  --limit <n>           keep at most this many, most recently modified first
-  --out <dir>           where report writes its files (report only, default: out)`;
-
 /** A scope narrowing, carrying its own description.
  *
  * [LAW:one-source-of-truth] The description is produced by the same expression that
@@ -133,25 +116,67 @@ const EMPTY: Draft = { projects: null, filters: [], limit: null, out: null };
 
 const withFilter = (d: Draft, f: Filter): Draft => ({ ...d, filters: [...d.filters, f] });
 
+/** One option: how it is spelled, what it means, and what it does to the draft.
+ *
+ * The `help` lines live HERE rather than in a usage paragraph, because a description
+ * kept anywhere else is a second account of the same option, free to drift from the row
+ * that defines it the first time either changes. [LAW:one-source-of-truth] */
+interface FlagSpec {
+  /** The value's placeholder in the usage text, e.g. `<dir>`. */
+  placeholder: string;
+  help: readonly string[];
+  read: (value: string) => (d: Draft) => Draft;
+}
+
 /** How an argument is recognised, as a TABLE.
  *
  * [LAW:dataflow-not-control-flow] A new option is a new ROW, in the same idiom
  * `ORIGIN_RULES` uses in `calls.ts` and the old report parser used before it — never
- * another arm of a growing `if`. Each row is a pure `value -> (draft -> draft)`, so the
- * fold below has no knowledge of any particular flag. */
-const FLAGS: Record<string, (value: string) => (d: Draft) => Draft> = {
-  '--projects': (v) => (d) => ({ ...d, projects: v }),
-  '--out': (v) => (d) => ({ ...d, out: v }),
-  '--limit': (v) => (d) => ({ ...d, limit: positiveInt('--limit', v) }),
-  '--project': (v) => (d) =>
-    withFilter(d, { describe: `project matches /${v}/`, keep: byProject(regexOf(v)) }),
-  '--since': (v) => (d) =>
-    withFilter(d, { describe: `modified on or after ${v}`, keep: modifiedSince(epochOf(v)) }),
-  '--session': (v) => (d) =>
-    withFilter(d, {
-      describe: `session id starts with ${v}`,
-      keep: (s) => s.sessionId.startsWith(v),
-    }),
+ * another arm of a growing `if`. Each row's `read` is a pure `value -> (draft -> draft)`,
+ * so the fold below has no knowledge of any particular flag.
+ *
+ * Declared in the order they are printed, so the table's order IS the usage text's
+ * order and there is no second list deciding it. */
+const FLAGS: Record<string, FlagSpec> = {
+  '--projects': {
+    placeholder: '<dir>',
+    help: ['the Claude Code projects directory to scan', "(default: this machine's ~/.claude/projects)"],
+    read: (v) => (d) => ({ ...d, projects: v }),
+  },
+  '--project': {
+    placeholder: '<regex>',
+    help: ['keep sessions whose project directory matches'],
+    read: (v) => (d) =>
+      withFilter(d, { describe: `project matches /${v}/`, keep: byProject(regexOf(v)) }),
+  },
+  '--session': {
+    placeholder: '<prefix>',
+    help: ['keep sessions whose id starts with this'],
+    read: (v) => (d) =>
+      withFilter(d, {
+        describe: `session id starts with ${v}`,
+        keep: (s) => s.sessionId.startsWith(v),
+      }),
+  },
+  '--since': {
+    placeholder: '<YYYY-MM-DD>',
+    help: ['keep sessions modified on or after this date'],
+    read: (v) => (d) =>
+      withFilter(d, { describe: `modified on or after ${v}`, keep: modifiedSince(epochOf(v)) }),
+  },
+  '--limit': {
+    placeholder: '<n>',
+    help: [
+      'keep at most this many, most recently modified first',
+      '(report applies it differently — see report above)',
+    ],
+    read: (v) => (d) => ({ ...d, limit: positiveInt('--limit', v) }),
+  },
+  '--out': {
+    placeholder: '<dir>',
+    help: ['where report writes its files (report only, default: out)'],
+    read: (v) => (d) => ({ ...d, out: v }),
+  },
 };
 
 const SCOPE_FLAGS = ['--projects', '--project', '--session', '--since', '--limit'] as const;
@@ -161,6 +186,10 @@ const SCOPE_FLAGS = ['--projects', '--project', '--session', '--since', '--limit
  * [LAW:dataflow-not-control-flow] The whole command set is data. Adding `stratigraphy`
  * later is one row, and the driver's dispatch stays the same shape it is now. */
 interface CommandSpec {
+  /** What this command produces, and any way it reads a shared flag differently. Same
+   * reason as `FlagSpec.help`: the description belongs to the row that defines the
+   * command. [LAW:one-source-of-truth] */
+  help: readonly string[];
   accepts: readonly string[];
   build: (d: Draft, scope: Scope) => Command;
 }
@@ -169,10 +198,27 @@ interface CommandSpec {
  * exist and cannot omit one that does — the compiler checks the set both ways.
  * [LAW:types-are-the-program] */
 const COMMANDS: Record<Command['kind'], CommandSpec> = {
-  help: { accepts: [], build: () => ({ kind: 'help' }) },
-  list: { accepts: SCOPE_FLAGS, build: (_d, scope) => ({ kind: 'list', scope }) },
-  trace: { accepts: SCOPE_FLAGS, build: (_d, scope) => ({ kind: 'trace', scope }) },
+  help: { help: ['this text'], accepts: [], build: () => ({ kind: 'help' }) },
+  list: {
+    help: ['one row per in-scope session, tab-separated, on stdout'],
+    accepts: SCOPE_FLAGS,
+    build: (_d, scope) => ({ kind: 'list', scope }),
+  },
+  trace: {
+    help: ['the span tree of every in-scope session, as JSON, on stdout'],
+    accepts: SCOPE_FLAGS,
+    build: (_d, scope) => ({ kind: 'trace', scope }),
+  },
   report: {
+    // The `--limit` caveat is stated on the command that diverges, so a reader of the
+    // usage text learns it at the point it applies rather than being told, everywhere,
+    // a rule that is only true on two of the three commands.
+    help: [
+      'the HTML report and corpus.json, written into --out',
+      '--limit caps what is RENDERED, and applies after report has',
+      'narrowed again (sessions with spawned conversations first, then',
+      'at most two per project) — so it is not the N most recent.',
+    ],
     accepts: [...SCOPE_FLAGS, '--out'],
     build: (d, scope) => ({
       kind: 'report',
@@ -185,13 +231,54 @@ const COMMANDS: Record<Command['kind'], CommandSpec> = {
 
 export const COMMAND_NAMES = Object.keys(COMMANDS) as readonly Command['kind'][];
 
-/** The one place an untrusted string is admitted as a command name.
+/** The lookup structures, derived from the tables above.
  *
- * [LAW:parse-dont-validate] The cast lives here and nowhere else: everything past this
- * function holds a `CommandSpec` or has already thrown, so no caller re-checks whether
- * a name was real. */
-const commandNamed = (name: string): CommandSpec | undefined =>
-  (COMMANDS as Record<string, CommandSpec | undefined>)[name];
+ * [LAW:types-are-the-program] A `Map` rather than the object literal itself, because an
+ * object literal inherits from `Object.prototype`: `COMMANDS['constructor']` answers the
+ * `Object` constructor, truthy, and sails past the "unrecognised command" check to die
+ * later on `command.build is not a function`. `miser constructor` did exactly that. A
+ * `Map` has no prototype chain to inherit through, so `.get('constructor')` is
+ * `undefined` by construction and there is no own-property check to remember at each
+ * lookup — the illegal read is unrepresentable rather than tested for.
+ *
+ * Derived rather than declared, so the object literals stay the single authoritative
+ * tables. [LAW:one-source-of-truth] `COMMANDS` in particular must remain a
+ * `Record<Command['kind'], …>` literal: that is what makes the compiler check the
+ * command set both ways, and a hand-written `Map` would check neither. */
+const COMMAND_LOOKUP: ReadonlyMap<string, CommandSpec> = new Map(Object.entries(COMMANDS));
+const FLAG_LOOKUP: ReadonlyMap<string, FlagSpec> = new Map(Object.entries(FLAGS));
+
+/** One `label   description` block, laid out so continuation lines align under the
+ * first. The same renderer for commands and options, because they are the same shape.
+ * [LAW:one-type-per-behavior] */
+const block = (rows: readonly { label: string; help: readonly string[] }[]): string => {
+  const width = Math.max(...rows.map((r) => r.label.length)) + 2;
+  return rows
+    .flatMap(({ label, help }) =>
+      help.map((line, i) => `  ${(i === 0 ? label : '').padEnd(width)}${line}`),
+    )
+    .join('\n');
+};
+
+/** The usage text, computed from the tables that define the commands and options.
+ *
+ * [FRAMING:representation] The map the machine redraws. PROJECT.md states that this text
+ * is generated from the command table and so cannot fall out of step with it; before
+ * this it was a hand-written literal and the claim was false — adding a row to `COMMANDS`
+ * left the usage text silently stale. Now adding `stratigraphy` is still one row, and the
+ * row brings its own line of help with it. */
+export const USAGE = `usage: miser <command> [options]
+
+commands:
+${block(COMMAND_NAMES.map((n) => ({ label: n, help: COMMANDS[n].help })))}
+
+options:
+${block(
+  Object.entries(FLAGS).map(([flag, spec]) => ({
+    label: `${flag} ${spec.placeholder}`,
+    help: spec.help,
+  })),
+)}`;
 
 /** Turn a command line into the one command it names.
  *
@@ -215,7 +302,7 @@ export function readArgs(argv: readonly string[]): Command {
   // `miser help --limit 3` accept and ignore the flag — the silent no-op that loop
   // exists to prevent, reintroduced by the one command that skipped it.
   const name = HELP_TOKENS.has(first) ? 'help' : first;
-  const command = commandNamed(name);
+  const command = COMMAND_LOOKUP.get(name);
   if (!command)
     throw new Error(
       `unrecognised command \`${name}\`. Expected one of ${COMMAND_NAMES.join(', ')}.\n\n${USAGE}`,
@@ -224,8 +311,8 @@ export function readArgs(argv: readonly string[]): Command {
   let draft = EMPTY;
   for (let i = 0; i < rest.length; i += 2) {
     const flag = rest[i]!;
-    const read = FLAGS[flag];
-    if (!read) throw new Error(`unrecognised argument \`${flag}\`.\n\n${USAGE}`);
+    const spec = FLAG_LOOKUP.get(flag);
+    if (!spec) throw new Error(`unrecognised argument \`${flag}\`.\n\n${USAGE}`);
     if (!command.accepts.includes(flag))
       throw new Error(
         `\`${flag}\` is not an option of \`${name}\`. ` +
@@ -234,7 +321,7 @@ export function readArgs(argv: readonly string[]): Command {
       );
     const value = rest[i + 1];
     if (value === undefined) throw new Error(`\`${flag}\` needs a value.\n\n${USAGE}`);
-    draft = read(value)(draft);
+    draft = spec.read(value)(draft);
   }
 
   return command.build(draft, {
