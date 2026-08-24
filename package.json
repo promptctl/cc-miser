@@ -3,8 +3,14 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "bin": {
+    "miser": "src/cli/main.ts"
+  },
   "scripts": {
-    "report": "bun run src/report/generate.ts",
+    "miser": "bun run src/cli/main.ts",
+    "report": "bun run src/cli/main.ts report",
+    "list": "bun run src/cli/main.ts list",
+    "trace": "bun run src/cli/main.ts trace",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "privacy": "bash scripts/privacy-scan.sh"

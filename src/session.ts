@@ -42,6 +42,26 @@ export interface AnalyzedSession {
  * all. [LAW:effects-at-boundaries] */
 export type ReadText = (path: string) => string;
 
+/** Run `work` and, if it throws, name the transcript it was working on.
+ *
+ * [LAW:one-source-of-truth] One phrasing of "which of the hundreds of files broke",
+ * shared by every command, rather than one command carrying the guarantee and the other
+ * two quietly not. The `EXIT.FAILED` contract promises the message names the transcript;
+ * this is the single place that keeps the promise.
+ *
+ * [LAW:no-silent-failure] The original is kept as `cause`, so naming the file adds
+ * context instead of replacing it — an error that says where to look is the whole
+ * difference between a failure and a mystery when the scan covered 490 sessions. */
+export function naming<T>(source: SessionSource, work: () => T): T {
+  try {
+    return work();
+  } catch (e) {
+    throw new Error(`failed to analyze ${source.path}: ${e instanceof Error ? e.message : String(e)}`, {
+      cause: e,
+    });
+  }
+}
+
 export function analyzeSession(source: SessionSource, readText: ReadText): AnalyzedSession {
   const { lines, stats, cwd } = parseTranscript(readText(source.path));
   const conversation = buildConversation(lines);
