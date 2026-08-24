@@ -395,6 +395,32 @@ describe('residency-predicts-cache-read', () => {
     expect(perCall.map((p) => p.delta)).toEqual([0, 0, 0]);
   });
 
+  test('a SECOND epoch is also predicted from the prefix IT opened on, not from call 0', () => {
+    // Every fixture above has exactly one epoch, so restoring the base term for an epoch
+    // that opens after a mid-session drop — the 56.3%-of-epochs case this fix targets —
+    // was previously pinned only by the real-corpus smoke test, which has no declared
+    // answers and can show the identities HOLD but never that they'd have CAUGHT the old
+    // bug. This fixture has two: epoch 0 opens cold (calls 0-1), cache_read DROPS at call
+    // 2 (the cached prefix from epoch 0 didn't survive), opening epoch 1 on a 200-token
+    // prefix (calls 2-3).
+    const { perCall } = analyzed(callsCosting(
+      { input: 5, cacheCreation: 1000, cacheRead: 0, output: 100 }, // epoch 0 opens cold
+      { input: 5, cacheCreation: 500, cacheRead: 1000, output: 100 }, // epoch 0, predicted: 0+1000
+      { input: 5, cacheCreation: 300, cacheRead: 200, output: 100 }, // DROP: epoch 1 opens on 200
+      { input: 5, cacheCreation: 100, cacheRead: 500, output: 100 }, // epoch 1, predicted: 200+300
+    )).conservation;
+    // The old, buggy equation assumed every epoch opens on zero: it would predict call 3
+    // from `sum(creation of calls in this epoch before it)` alone — 300, not 500 — and
+    // report a 200-token violation here. Restoring the base term predicts it from the
+    // prefix epoch 1 actually opened on (200) plus what call 2 wrote (300).
+    expect(perCall[3]!.expected).toBe(500);
+    expect(perCall[3]!.delta).toBe(0);
+    expect(perCall[3]!.predictable).toBe(true);
+    // Call 2 opened epoch 1: nothing preceded it in that epoch to predict it from, so it
+    // is excluded from being a "prediction" at all rather than counted as a free match.
+    expect(perCall[2]!.predictable).toBe(false);
+  });
+
   test('the aggregate route is the per-call result summed, so the two cannot disagree', () => {
     // [LAW:one-source-of-truth] These were independent expressions of one model and drifted
     // the moment the base term was added to only one of them.

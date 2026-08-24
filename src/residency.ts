@@ -103,7 +103,12 @@ export interface ConservationCheck {
  * specimen opened cold. Corpus-wide it holds on 26.2% of 47,782 calls; 56.3% of epochs
  * open on a prefix that survived, and for each of those the prediction was short by the
  * whole surviving prefix, on every call in the epoch. Restoring the base term takes it to
- * 84.6%. A theorem checked on the one specimen that cannot disprove it is not checked.
+ * 84.2% of all calls — INCLUDING epoch-openers, which match trivially by construction
+ * (see `PerCallCheck.predictable` below) and so cannot be evidence of anything. Over
+ * predictable calls only — the honest population — it's 83.9%; that is the figure
+ * `src/invariants.ts`'s `residency-predicts-cache-read` basis states and measures, and
+ * the one to trust. A theorem checked on the one specimen that cannot disprove it is not
+ * checked.
  *
  * WHAT THE REMAINING 15% IS. The per-call form is cumulative: one bad boundary poisons
  * every later call in its epoch. Stated LOCALLY instead — each call's `cache_read` equals
