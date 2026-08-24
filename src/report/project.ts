@@ -251,6 +251,7 @@ export function projectSession(a: AnalyzedSession, models: ModelTable): SessionR
       callsChecked: a.conservation.predictableCalls,
       callsExact: a.conservation.exactCalls,
       rootCalls: a.conversation.calls.length,
+      hasSpawnedWork: a.forest.placed.length > 0,
     },
     coverage,
     arenaBasis: arenaBasisOf(a.conversation.arrivals),

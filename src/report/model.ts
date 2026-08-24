@@ -175,6 +175,12 @@ export interface Conservation {
    * for a different reason than "every call opened its own epoch". Lets the renderer tell
    * the two apart instead of narrating a cause that didn't happen. */
   rootCalls: number;
+  /** Whether this session placed any spawned agent at all. `rootCalls === 0` does not by
+   * itself prove work was delegated — nothing rules out a root transcript with no
+   * assistant lines and no spawns either — so the renderer needs this to distinguish
+   * "delegated to a spawned agent" from "nothing happened here at all" before asserting
+   * which one occurred. */
+  hasSpawnedWork: boolean;
 }
 
 /** How much of the context-window arena rests on exact numbers rather than estimates.

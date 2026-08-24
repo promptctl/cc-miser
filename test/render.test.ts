@@ -14,16 +14,32 @@ const cons = (overrides: Partial<Conservation>): Conservation => ({
   callsChecked: 4,
   callsExact: 4,
   rootCalls: 5,
+  hasSpawnedWork: false,
   ...overrides,
 });
 
 describe('residencyCheck', () => {
-  test('no-calls: a root conversation with zero API calls gets its own honest state', () => {
-    const html = residencyCheck(cons({ rootCalls: 0, callsChecked: 0, callsExact: 0 }));
+  test('no-calls, delegated: work went to a spawned agent', () => {
+    const html = residencyCheck(
+      cons({ rootCalls: 0, callsChecked: 0, callsExact: 0, hasSpawnedWork: true }),
+    );
     expect(html).toContain('check note');
     expect(html).toContain('No root calls in this session');
+    expect(html).toContain('delegated to a spawned agent');
     // The exact false claim this state exists to avoid: no call opened an epoch here,
     // because there were no calls at all.
+    expect(html).not.toContain('opened its own epoch');
+  });
+
+  test('no-calls, nothing happened: no calls AND no spawns — delegation is not asserted', () => {
+    const html = residencyCheck(
+      cons({ rootCalls: 0, callsChecked: 0, callsExact: 0, hasSpawnedWork: false }),
+    );
+    expect(html).toContain('check note');
+    expect(html).toContain('No root calls in this session');
+    // rootCalls === 0 alone doesn't prove delegation happened; without hasSpawnedWork
+    // the copy must not claim it did.
+    expect(html).not.toContain('delegated to a spawned agent');
     expect(html).not.toContain('opened its own epoch');
   });
 

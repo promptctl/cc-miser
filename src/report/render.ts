@@ -323,7 +323,13 @@ function coverageBar(cov: Coverage): string {
  * in which case no call opened or failed to open an epoch, versus a root conversation
  * with calls where every one of them opened its own epoch (`rootCalls > 0`). Conflating
  * them would print "every call here opened its own epoch" for a session with no calls
- * to have done so. [LAW:no-silent-failure] */
+ * to have done so.
+ *
+ * `rootCalls === 0` ITSELF has two distinct causes: `hasSpawnedWork` tells them apart.
+ * The common one is delegation — every call went to a spawned agent — but nothing rules
+ * out a transcript with no assistant lines and no spawns either, and asserting
+ * delegation for that case would be a claim this data cannot back up.
+ * [LAW:no-silent-failure] */
 export function residencyCheck(cons: Conservation): string {
   const status =
     cons.rootCalls === 0
@@ -346,9 +352,12 @@ export function residencyCheck(cons: Conservation): string {
        ${cons.callsChecked}</b> predictable calls individually (epoch-opening calls,
        which have nothing to predict from, are excluded).`;
   const detail = {
-    'no-calls': `Every call here was delegated to a spawned agent — the root transcript
-         itself made no API calls, so there is nothing for the residency model to
-         predict or reconcile at this level.`,
+    'no-calls': cons.hasSpawnedWork
+      ? `Every call here was delegated to a spawned agent — the root transcript itself
+           made no API calls, so there is nothing for the residency model to predict or
+           reconcile at this level.`
+      : `This transcript made no API calls and spawned no agents — there is nothing for
+           the residency model to predict or reconcile at this level.`,
     'no-predictable': `Every call here opened its own epoch — the cached prefix never
          survived from one call to the next — so the residency model had no individual
          prediction to make. The two aggregate routes to total cache-read still agree
