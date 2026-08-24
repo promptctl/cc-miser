@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   COMMAND_NAMES,
+  FLAG_NAMES,
   DEFAULT_OUT,
   DEFAULT_RENDER_LIMIT,
   USAGE,
@@ -23,7 +24,7 @@ import {
   readArgs,
   type Scope,
 } from '../src/cli/args.ts';
-import { COLUMNS, listRow, toTsv } from '../src/cli/list.ts';
+import { COLUMNS, listRow, toTsv, type ListRow } from '../src/cli/list.ts';
 import { EXIT, main, run, type Streams } from '../src/cli/main.ts';
 import { SCHEMA, traceFile, traceNode } from '../src/cli/trace.ts';
 import type { SessionSource } from '../src/discover.ts';
@@ -90,8 +91,11 @@ describe('a command line is parsed into the one command it names', () => {
     // table, so a new row cannot leave it stale. Asserted on the observable text rather
     // than on how it is built. [LAW:behavior-not-structure]
     for (const name of COMMAND_NAMES) expect(USAGE).toContain(name);
-    for (const flag of ['--projects', '--project', '--session', '--since', '--limit', '--out'])
-      expect(USAGE).toContain(flag);
+    // Read from the same table `USAGE` is built from. A hand-copied list here would keep
+    // passing after a new flag row was added, which is the exact drift this asserts
+    // against. [LAW:one-source-of-truth]
+    expect(FLAG_NAMES.length).toBeGreaterThan(0);
+    for (const flag of FLAG_NAMES) expect(USAGE).toContain(flag);
   });
 
   test('the usage text says how report reads --limit differently', () => {
@@ -557,6 +561,96 @@ describe('the exit codes are the contract they are documented to be', () => {
     const t = rt();
     expect(main(['--help'], t.rt)).toBe(EXIT.OK);
     expect(t.out()).toContain('usage: miser');
+  });
+});
+
+describe('one session is always one line of TSV', () => {
+  // A POSIX directory name may legally contain a newline, and `project` is the last
+  // segment of a real one. An un-stripped `\n` does not merely misplace a field — it
+  // ends the row and starts another with the wrong column count, so one session is read
+  // downstream as two malformed records.
+  const rowWith = (project: string): ListRow => ({
+    session: 'abc',
+    project,
+    started: '2026-01-01',
+    wallMin: 1,
+    calls: 1,
+    spawnedCalls: 0,
+    maxDepth: 0,
+    tokEq: 1,
+    spawnedTokEq: 0,
+    usd: 0,
+    unpricedTokEq: 0,
+  });
+
+  for (const [name, project] of [
+    ['a newline', 'we\nird'],
+    ['a carriage return', 'we\rird'],
+    ['a tab', 'we\tird'],
+    ['all three', 'a\tb\nc\rd'],
+  ] as const) {
+    test(`${name} in a project name cannot split the row`, () => {
+      const lines = toTsv([rowWith(project)]).split('\n');
+      expect(lines).toHaveLength(2); // header plus exactly one row
+      expect(lines[1]!.split('\t')).toHaveLength(COLUMNS.length);
+    });
+  }
+});
+
+describe('a failure names the transcript that caused it', () => {
+  const { root, rt } = corpus();
+
+  // The EXIT.FAILED contract says the message on stderr names the transcript. Asserted
+  // for every command, because the guarantee used to hold only for `report` — `list` and
+  // `trace` called `analyzeSession` bare, so a throw from deep inside reached stderr with
+  // nothing saying which of hundreds of scanned files it came from.
+  for (const command of ['list', 'trace', 'report'] as const) {
+    test(`${command} says which file broke`, () => {
+      const t = rt();
+      const exploding: Runtime = {
+        ...t.rt,
+        read: () => {
+          throw new Error('malformed transcript');
+        },
+      };
+      const argv = [command, '--projects', root, ...(command === 'report' ? ['--out', join(root, `o-${command}`)] : [])];
+      expect(main(argv, exploding)).toBe(EXIT.FAILED);
+      expect(t.err()).toContain('malformed transcript');
+      // The contract is that the message NAMES the transcript — not which stage did the
+      // naming. `report` fails first in calibration, which has its own wrap and its own
+      // wording; pinning the verb here would assert the wiring rather than the promise.
+      expect(t.err()).toMatch(/\.jsonl/);
+    });
+  }
+});
+
+describe('a flag given an empty value is a usage error, not a filesystem error', () => {
+  // An unset shell variable expands to nothing, and `--out ''` used to slip past
+  // `d.out ?? DEFAULT_OUT` (an empty string is not nullish) to surface as a raw ENOENT
+  // under EXIT.FAILED instead of the usage error every other bad value gets.
+  for (const flag of FLAG_NAMES) {
+    test(`${flag} rejects an empty value`, () => {
+      const command = flag === '--out' ? 'report' : 'list';
+      expect(() => readArgs([command, flag, ''])).toThrow(/needs a value/);
+    });
+  }
+});
+
+describe('--since accepts the format it documents, and only that', () => {
+  test('a plain YYYY-MM-DD is read as UTC midnight', () => {
+    const s = scopeOf(['list', '--since', '2026-01-01']);
+    expect(s.filters).toHaveLength(1);
+  });
+
+  test('a form Date.parse would read in the local zone is refused', () => {
+    // These parse fine, and would silently shift the inclusion boundary by the machine's
+    // UTC offset while the code still claimed start-of-day UTC.
+    for (const raw of ['2026-01-01T10:00:00', 'January 1, 2026', '2026-1-1'])
+      expect(() => readArgs(['list', '--since', raw])).toThrow(/needs a date as `YYYY-MM-DD`/);
+  });
+
+  test('gibberish is still refused', () => {
+    expect(() => readArgs(['list', '--since', 'lastweek'])).toThrow(/needs a date/);
   });
 });
 

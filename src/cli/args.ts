@@ -90,16 +90,26 @@ const positiveInt = (flag: string, raw: string): number => {
   return value;
 };
 
-/** A date at the start of its day, UTC.
+/** A `YYYY-MM-DD` date at the start of its day, UTC.
  *
- * [LAW:no-silent-failure] `Date.parse` answers `NaN` for gibberish, and an unchecked
- * NaN becomes a comparison that is false for every session — an empty result that looks
+ * [LAW:parse-dont-validate] The pattern is checked BEFORE `Date.parse`, so the format
+ * this accepts is the format it documents. `Date.parse` takes far more than
+ * `YYYY-MM-DD`, and the extras do not keep the promise in that first line: the bare date
+ * form is specified as UTC midnight, but `2026-01-01T10:00:00` or `January 1, 2026` are
+ * read in the LOCAL zone, so accepting them would slide the session-inclusion boundary
+ * by the machine's offset while this comment still claimed UTC. Narrowing the input is
+ * the fix; widening the comment would only make the drift official.
+ *
+ * [LAW:no-silent-failure] `Date.parse` answers `NaN` for gibberish, and an unchecked NaN
+ * becomes a comparison that is false for every session — an empty result that looks
  * exactly like "nothing matched" and means "your date was nonsense". */
+const YYYY_MM_DD = /^\d{4}-\d{2}-\d{2}$/;
+
 function epochOf(raw: string): number {
-  const ms = Date.parse(raw);
+  const ms = YYYY_MM_DD.test(raw) ? Date.parse(raw) : Number.NaN;
   if (Number.isNaN(ms))
     throw new Error(
-      `\`--since\` needs a date, got \`${raw}\`. Try a plain \`YYYY-MM-DD\`.\n\n${USAGE}`,
+      `\`--since\` needs a date as \`YYYY-MM-DD\`, got \`${raw}\`.\n\n${USAGE}`,
     );
   return ms;
 }
@@ -242,6 +252,14 @@ const COMMANDS: Record<Command['kind'], CommandSpec> = {
 
 export const COMMAND_NAMES = Object.keys(COMMANDS) as readonly Command['kind'][];
 
+/** Every option this tool accepts, from the table that defines them.
+ *
+ * Exported as the counterpart to `COMMAND_NAMES` so a test asserting "the usage text
+ * documents every flag" reads the same table `USAGE` is generated from. A hand-copied
+ * list in the test would pass forever after a new row was added — the drift this file
+ * spends its comments avoiding, reintroduced by the check meant to prove it. */
+export const FLAG_NAMES = Object.keys(FLAGS);
+
 /** The lookup structures, derived from the tables above.
  *
  * [LAW:types-are-the-program] A `Map` rather than the object literal itself, because an
@@ -331,7 +349,17 @@ export function readArgs(argv: readonly string[]): Command {
           `\n\n${USAGE}`,
       );
     const value = rest[i + 1];
-    if (value === undefined) throw new Error(`\`${flag}\` needs a value.\n\n${USAGE}`);
+    // Missing and empty are the same user error, and they arrive the same way: an unset
+    // shell variable expanding to nothing. Checked once here rather than in each row,
+    // because no flag has a meaningful empty value and a per-row check is one every
+    // future row has to remember. [LAW:single-enforcer]
+    //
+    // Left unchecked, `--out ''` slipped past `d.out ?? DEFAULT_OUT` — an empty string is
+    // not nullish — and surfaced as a raw ENOENT from `mkdirSync` under EXIT.FAILED,
+    // rather than the usage error every other malformed value gets. `--projects ''` did
+    // the same through `explicit ?? defaultProjectsRoot(env)`.
+    if (value === undefined || value === '')
+      throw new Error(`\`${flag}\` needs a value.\n\n${USAGE}`);
     draft = spec.read(value)(draft);
   }
 

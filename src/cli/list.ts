@@ -96,8 +96,14 @@ const _everyFieldIsAColumn: MissingColumn extends never ? true : MissingColumn =
  *
  * A project name containing a tab would corrupt a row, so tabs are replaced with a
  * space rather than escaped: this is a display name derived from a real directory, and
- * a quoting scheme would oblige every consumer to implement the unquoting. */
-const cell = (v: string | number): string => String(v).replace(/\t/g, ' ');
+ * a quoting scheme would oblige every consumer to implement the unquoting.
+ *
+ * Newlines and carriage returns go the same way, and for a worse reason than tabs. A
+ * POSIX directory name may legally contain a newline, and `project` is the last segment
+ * of a real one — so an un-stripped `\n` does not merely misplace a field, it ends the
+ * row early and starts a second one with the wrong number of columns, turning one
+ * session into two malformed records that every consumer reads as data. */
+const cell = (v: string | number): string => String(v).replace(/[\t\r\n]/g, ' ');
 
 export const toTsv = (rows: readonly ListRow[]): string =>
   [COLUMNS.join('\t'), ...rows.map((r) => COLUMNS.map((c) => cell(r[c])).join('\t'))].join('\n');

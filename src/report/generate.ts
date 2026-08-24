@@ -64,7 +64,7 @@ import { hasSpawns, type SessionSource } from '../discover.ts';
 import { fitTokenizers, PRICE_SOURCE, addPrices, ZERO_PRICES, type ModelTable } from '../models.ts';
 import { addOutput, calibrationGroup, ZERO_OUTPUT } from '../output.ts';
 import { parseTranscript } from '../records.ts';
-import { analyzeSession, type ReadText } from '../session.ts';
+import { analyzeSession, naming, type ReadText } from '../session.ts';
 import { eqCost } from '../tokens.ts';
 import { projectSession } from './project.ts';
 import type {
@@ -268,14 +268,9 @@ export function analyzeAll(
     // that cannot be analyzed is a pipeline bug, and the previous `catch { return
     // null }` here made a crash and an empty result indistinguishable. The path is
     // added to the message so the failure names the input that caused it.
-    try {
-      sessions.push(projectSession(analyzeSession(source, readText), models));
-    } catch (e) {
-      throw new Error(
-        `failed to analyze ${source.path}: ${e instanceof Error ? e.message : String(e)}`,
-        { cause: e },
-      );
-    }
+    // The naming wrap covers `projectSession` too, not just the analysis, because a
+    // failure pricing a session is as anonymous as a failure parsing one.
+    sessions.push(naming(source, () => projectSession(analyzeSession(source, readText), models)));
     onSession(source);
   }
   return sessions;

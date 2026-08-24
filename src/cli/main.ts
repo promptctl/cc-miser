@@ -34,7 +34,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { discoverSessions, projectsRoot, type SessionSource } from '../discover.ts';
-import { analyzeSession, type ReadText } from '../session.ts';
+import { analyzeSession, naming, type ReadText } from '../session.ts';
 import { applyScope, readArgs, USAGE, type Command, type Scope } from './args.ts';
 import { listRow, toTsv } from './list.ts';
 import { traceFile } from './trace.ts';
@@ -126,7 +126,7 @@ export function run(command: Command, rt: Runtime): number {
   // three genuinely different artifacts, not one artifact with a mode.
   switch (command.kind) {
     case 'list': {
-      const rows = picked.map((s) => listRow(analyzeSession(s, read)));
+      const rows = picked.map((s) => listRow(naming(s, () => analyzeSession(s, read))));
       streams.out(`${toTsv(rows)}\n`);
       const tokEq = rows.reduce((a, r) => a + r.tokEq, 0);
       const usd = rows.reduce((a, r) => a + r.usd, 0);
@@ -140,7 +140,7 @@ export function run(command: Command, rt: Runtime): number {
     }
 
     case 'trace': {
-      const analyzed = picked.map((s) => analyzeSession(s, read));
+      const analyzed = picked.map((s) => naming(s, () => analyzeSession(s, read)));
       streams.out(`${JSON.stringify(traceFile(analyzed, root, criteria, now), null, 2)}\n`);
       const notes = analyzed.reduce((a, s) => a + s.notes.length, 0);
       streams.err(`${analyzed.length} session trees written · ${notes} notes carried\n`);
@@ -247,14 +247,19 @@ export function main(argv: readonly string[], rt: Runtime): number {
 // `import.meta.main` is false when a test imports `run` above, so importing this module
 // never runs a corpus scan as a side effect — the exact trap `src/report/args.ts` was
 // carved out of `generate.ts` to escape.
+// `process.exitCode`, NEVER `process.exit()`. Writing to stdout is non-blocking when
+// stdout is a pipe, so `process.exit()` terminates with bytes still sitting in the pipe
+// buffer — measured here at exactly 65,536 of 798,808, i.e. one buffer's worth, which
+// made `miser trace | jq` die on unfinished JSON while the same command redirected to a
+// file was whole. Setting the code and letting the process end when the event loop
+// drains flushes the stream first. The truncation is invisible to the writer and only
+// appears under the pipe this tool's output contract is designed around.
 if (import.meta.main)
-  process.exit(
-    main(process.argv.slice(2), {
-      env: process.env,
-      streams: { out: (t) => process.stdout.write(t), err: (t) => process.stderr.write(t) },
-      now: Date.now(),
-      read: readText,
-    }),
-  );
+  process.exitCode = main(process.argv.slice(2), {
+    env: process.env,
+    streams: { out: (t) => process.stdout.write(t), err: (t) => process.stderr.write(t) },
+    now: Date.now(),
+    read: readText,
+  });
 
 export { USAGE };
