@@ -130,6 +130,16 @@ const cacheSurvivingBoundaries = (conv: Conversation): Array<{ i: number; a: Cal
 const groupsWithRealLastLine = (conv: Conversation): Call[] =>
   conv.calls.filter((c) => USAGE_COMPONENTS.some((k) => c.lastLineUsage[k] !== 0));
 
+/** Calls whose adopted line's usage block carried a `cache_creation` breakdown.
+ *
+ * A block with none makes `unaccountedCacheCreation` trivially 0 — nothing was there to
+ * disagree with `cache_creation_input_tokens` — which is a different fact from a
+ * breakdown that was checked and found to sum correctly. Excluded the same way
+ * `groupsWithRealLastLine` excludes placeholder tails: not a violation and not an
+ * exception, a call with nothing to claim. [LAW:no-silent-failure] */
+const groupsWithCacheCreationBreakdown = (conv: Conversation): Call[] =>
+  conv.calls.filter((c) => c.hasCacheCreationBreakdown);
+
 const flatUsage = (s: AnalyzedSession): Usage =>
   conversationsOf(s)
     .flatMap(({ conv }) => conv.calls)
@@ -164,14 +174,18 @@ export const IDENTITIES: readonly Identity[] = [
     basis:
       'LAW, and one of the two rows that closes against figures NEITHER implementation ' +
       'derived: both sides are raw API output, and the breakdown is read nowhere else in ' +
-      'the pipeline. Exact across all 91,301 blocks carrying a breakdown. It is also the ' +
+      'the pipeline. Exact across every call whose adopted line carries a breakdown — a ' +
+      'call with none is excluded from being a site at all (`groupsWithCacheCreationBreakdown`), ' +
+      'because there `unaccountedCacheCreation` is 0 by construction rather than by a ' +
+      'check that ran and passed; counting it as a site would inflate this row exactly ' +
+      "the way an unfiltered `residency-predicts-cache-read` used to. It is also the " +
       'only alarm for format drift on the TOKEN axis — a new TTL tier that stops being ' +
       'included in the flat total leaves the line type, and every field we read, ' +
       'unchanged, so `unknownTypes` is structurally blind to it.',
     maxViolationRate: 0,
     claims: (s) =>
       conversationsOf(s).flatMap(({ what, conv }) =>
-        conv.calls.map((c) => ({
+        groupsWithCacheCreationBreakdown(conv).map((c) => ({
           site: `${what} call ${c.index}: cache-creation tiers vs flat total`,
           left: c.unaccountedCacheCreation,
           right: 0,

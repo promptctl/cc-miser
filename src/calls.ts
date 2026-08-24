@@ -42,8 +42,13 @@ export interface Call {
   /** Cache-creation tokens the adopted snapshot's own per-TTL breakdown reported and its
    * flat total did not account for. Zero everywhere in the corpus; non-zero means the one
    * figure this pipeline costs cache writes from has stopped totalling the tiers beside
-   * it. See `ParsedUsage` in `records.ts`. */
+   * it. See `ParsedUsage` in `records.ts`. Trivially zero, rather than checked-and-zero,
+   * when `hasCacheCreationBreakdown` is false. */
   unaccountedCacheCreation: number;
+  /** Whether the adopted snapshot's line carried a `cache_creation` breakdown at all —
+   * i.e. whether `unaccountedCacheCreation` is evidence or a vacuous non-comparison. See
+   * `ParsedUsage` in `records.ts`. */
+  hasCacheCreationBreakdown: boolean;
   blocks: ContentBlock[];
 }
 
@@ -88,6 +93,7 @@ const completeUsage = (a: UsageSnapshot, b: UsageSnapshot): UsageSnapshot =>
 interface UsageSnapshot {
   usage: Usage;
   unaccountedCacheCreation: number;
+  hasCacheCreationBreakdown: boolean;
 }
 
 /** Something that entered the context window between two calls. */
@@ -297,6 +303,7 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
           usage: line.usage,
           lastLineUsage: line.usage,
           unaccountedCacheCreation: line.unaccountedCacheCreation,
+          hasCacheCreationBreakdown: line.hasCacheCreationBreakdown,
           blocks: [],
         };
         byRequest.set(line.requestId, call);
@@ -310,6 +317,7 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
         const chosen = completeUsage(call, line);
         call.usage = chosen.usage;
         call.unaccountedCacheCreation = chosen.unaccountedCacheCreation;
+        call.hasCacheCreationBreakdown = chosen.hasCacheCreationBreakdown;
         call.lineCount++;
         for (const block of line.blocks) {
           call.blocks.push(block); // unioned across the whole request group

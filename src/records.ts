@@ -43,6 +43,11 @@ export interface AssistantLine {
   /** Cache-creation tokens this line's own per-TTL breakdown reports that `usage`
    * does not account for. See `ParsedUsage`. */
   unaccountedCacheCreation: number;
+  /** Whether this line's `usage` block carried a `cache_creation` breakdown at all.
+   * False makes `unaccountedCacheCreation` trivially 0 — there was nothing to disagree
+   * with — which is a different fact from a breakdown that was checked and matched. See
+   * `ParsedUsage`. */
+  hasCacheCreationBreakdown: boolean;
   blocks: ContentBlock[];
 }
 
@@ -204,8 +209,12 @@ function toolInputText(input: Json): string {
 interface ParsedUsage {
   usage: Usage;
   /** Cache-creation tokens the per-tier breakdown reports that the flat field does not
-   * total. Zero on all 91,301 blocks carrying a breakdown today. */
+   * total. Zero on all 91,301 blocks carrying a breakdown today — and also, trivially,
+   * on every block with no breakdown at all. See `hasCacheCreationBreakdown`. */
   unaccountedCacheCreation: number;
+  /** Whether `u.cache_creation` was present, i.e. whether `unaccountedCacheCreation`
+   * reflects a real comparison rather than "nothing to compare". */
+  hasCacheCreationBreakdown: boolean;
 }
 
 function parseUsage(raw: unknown): ParsedUsage {
@@ -227,6 +236,7 @@ function parseUsage(raw: unknown): ParsedUsage {
       output: num(u.output_tokens),
     },
     unaccountedCacheCreation: brokenOut - cacheCreation,
+    hasCacheCreationBreakdown: tiers !== null,
   };
 }
 
@@ -255,6 +265,7 @@ export function parseLine(raw: unknown): SessionLine {
         model: str(msg.model, '(unknown-model)'),
         usage: parsed.usage,
         unaccountedCacheCreation: parsed.unaccountedCacheCreation,
+        hasCacheCreationBreakdown: parsed.hasCacheCreationBreakdown,
         blocks: content.map(parseBlock),
       };
     }

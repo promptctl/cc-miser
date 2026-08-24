@@ -218,8 +218,12 @@ describe('cache-creation-accounted', () => {
     expect(a.sites).toBe(1);
   });
 
-  test('holds when the block carries no breakdown at all — there is nothing to disagree', () => {
+  test('is not a site at all when the block carries no breakdown — there is nothing to check', () => {
+    // Not "held trivially": EXCLUDED. A no-breakdown call makes unaccountedCacheCreation
+    // 0 by construction, and counting that as a checked-and-passed site would be the same
+    // vacuous-match inflation `residency-predicts-cache-read` had to be fixed for.
     const a = auditOne('cache-creation-accounted', analyzed(tiered(1000, null)));
+    expect(a.sites).toBe(0);
     expect(a.violations).toEqual([]);
   });
 
