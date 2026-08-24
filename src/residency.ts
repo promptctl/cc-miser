@@ -100,14 +100,20 @@ export interface ConservationCheck {
  * cache_creation ALONE, which is the same equation with `cache_read(epochStart)` assumed
  * to be zero. It recorded, as its licence for every residency-derived number downstream,
  * that it "held on 28 of 28 calls of the hand-traced specimen" — and it did, because that
- * specimen opened cold. Corpus-wide it holds on 26.2% of 47,782 calls; 56.3% of epochs
- * open on a prefix that survived, and for each of those the prediction was short by the
- * whole surviving prefix, on every call in the epoch. Restoring the base term takes it to
- * 84.2% of all calls — INCLUDING epoch-openers, which match trivially by construction
- * (see `PerCallCheck.predictable` below) and so cannot be evidence of anything. Over
- * predictable calls only — the honest population — it's 83.9%; that is the figure
- * `src/invariants.ts`'s `residency-predicts-cache-read` basis states and measures, and
- * the one to trust. A theorem checked on the one specimen that cannot disprove it is not
+ * specimen opened cold. On the corpus scanned when this fix landed (47,782 calls) it held
+ * on only 26.2% without the base term; 56.3% of epochs opened on a prefix that survived,
+ * and for each of those the prediction was short by the whole surviving prefix, on every
+ * call in the epoch.
+ *
+ * WITH the base term restored, re-measured on a LATER scan of 42,642 calls (corpus size
+ * moves between scans; the 47,782 above and the 42,642 here are two different snapshots,
+ * not the same population before and after) — 84.3% match INCLUDING epoch-openers, which
+ * match trivially by construction (see `PerCallCheck.predictable` below) and so cannot be
+ * evidence of anything; over the 41,886 predictable calls only — the honest population —
+ * it's 84.0%. That predictable-only figure is what `src/invariants.ts`'s
+ * `residency-predicts-cache-read` basis states and measures, and the one to trust; expect
+ * both numbers here to drift on the next re-measurement, since the corpus this comment
+ * reads is live. A theorem checked on the one specimen that cannot disprove it is not
  * checked.
  *
  * WHAT THE REMAINING 15% IS. The per-call form is cumulative: one bad boundary poisons

@@ -269,7 +269,7 @@ export const IDENTITIES: readonly Identity[] = [
       "the residency model's prediction of each call's cache_read equals the cache_read " +
       'the API reported',
     basis:
-      'MEASURED: exact on 83.9% of 41,547 PREDICTABLE calls — epoch-opening calls are ' +
+      'MEASURED: exact on 84.0% of 41,886 PREDICTABLE calls — epoch-opening calls are ' +
       'excluded (`PerCallCheck.predictable`), because there `expected` reduces to the ' +
       "call's own reported value with nothing added, so it matches by construction and " +
       'is not a genuine prediction; counting it would inflate this rate with calls the ' +
