@@ -782,8 +782,13 @@ describe('what arrived in the context window, and what could not be paired', () 
 describe('the residency model still holds on a session that spawns', () => {
   test('every root call’s cache_read equals what its epoch wrote before it', () => {
     // Two independent routes to one quantity. Aggregate agreement is weak — two wrong
-    // numbers cancel — so the claim asserted is the per-call one.
-    expect(analyzed.conservation.exactCalls).toBe(analyzed.conversation.calls.length);
+    // numbers cancel — so the claim asserted is the per-call one. A concrete count, not
+    // `exactCalls === predictableCalls`: that equality is also true, vacuously, if a
+    // regression misclassified every call as its own epoch-opener (predictableCalls and
+    // exactCalls would both collapse to 0 together). Call 0 is this session's one epoch's
+    // sole opener, so 3 of its 4 calls are predictable.
+    expect(analyzed.conservation.predictableCalls).toBe(3);
+    expect(analyzed.conservation.exactCalls).toBe(3);
     expect(analyzed.conservation.perCall.map((p) => p.delta)).toEqual([0, 0, 0, 0]);
   });
 

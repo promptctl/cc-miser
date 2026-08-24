@@ -18,6 +18,7 @@ import type {
   Activity,
   ArenaBasis,
   Calibration,
+  Conservation,
   CorpusReport,
   Cost,
   Coverage,
@@ -308,6 +309,69 @@ function coverageBar(cov: Coverage): string {
   </div>`;
 }
 
+/** How much the per-call reconciliation has to say, and what it found.
+ *
+ * [LAW:types-are-the-program] A four-way status rather than a boolean. `callsChecked
+ * === 0` is a distinct state — no predictable calls, so the model made no individual
+ * predictions to check — not a degenerate case of "exact": a session where every call
+ * opened its own epoch would otherwise print a 0-of-0 match through the same "ok" badge
+ * a real reconciliation earns, the exact vacuous-match presentation excluding
+ * epoch-openers from `exactCalls` was introduced to eliminate, just relocated from a
+ * guaranteed N-of-N to a guaranteed 0-of-0. And `callsChecked === 0` has two distinct
+ * CAUSES that must not share one narration: a root conversation can legitimately make
+ * zero API calls at all (every call delegated to a spawned agent — `rootCalls === 0`),
+ * in which case no call opened or failed to open an epoch, versus a root conversation
+ * with calls where every one of them opened its own epoch (`rootCalls > 0`). Conflating
+ * them would print "every call here opened its own epoch" for a session with no calls
+ * to have done so.
+ *
+ * `rootCalls === 0` ITSELF has two distinct causes: `hasSpawnedWork` tells them apart.
+ * The common one is delegation — every call went to a spawned agent — but nothing rules
+ * out a transcript with no assistant lines and no spawns either, and asserting
+ * delegation for that case would be a claim this data cannot back up.
+ * [LAW:no-silent-failure] */
+export function residencyCheck(cons: Conservation): string {
+  const status =
+    cons.rootCalls === 0
+      ? 'no-calls'
+      : cons.callsChecked === 0
+        ? 'no-predictable'
+        : cons.callsExact === cons.callsChecked
+          ? 'exact'
+          : 'mismatch';
+  const badge = { 'no-calls': 'note', 'no-predictable': 'note', exact: 'ok', mismatch: 'warn' }[status];
+  const headline = {
+    'no-calls': 'No root calls in this session',
+    'no-predictable': 'No predictable calls in this session',
+    exact: 'Residency reconstruction is exact',
+    mismatch: 'Residency reconstruction does not reconcile',
+  }[status];
+  const reconciliation = `Two independent routes to total cache-read — the API's own
+       reported figure (${n(cons.actualCacheRead)}) and the residency model's prediction
+       (${n(cons.predictedCacheRead)}) — agree on <b>${cons.callsExact} of
+       ${cons.callsChecked}</b> predictable calls individually (epoch-opening calls,
+       which have nothing to predict from, are excluded).`;
+  const detail = {
+    'no-calls': cons.hasSpawnedWork
+      ? `Every call here was delegated to a spawned agent — the root transcript itself
+           made no API calls, so there is nothing for the residency model to predict or
+           reconcile at this level.`
+      : `This transcript made no API calls and spawned no agents — there is nothing for
+           the residency model to predict or reconcile at this level.`,
+    'no-predictable': `Every call here opened its own epoch — the cached prefix never
+         survived from one call to the next — so the residency model had no individual
+         prediction to make. The two aggregate routes to total cache-read still agree
+         (${n(cons.actualCacheRead)} actual vs ${n(cons.predictedCacheRead)} predicted),
+         but that agreement is trivial with nothing to check it against.`,
+    exact: reconciliation,
+    mismatch: reconciliation,
+  }[status];
+  return `<div class="check ${badge}">
+    <b>${headline}</b>
+    <p>${detail}</p>
+  </div>`;
+}
+
 /** How much of the arena rests on exact numbers rather than on chars/4.
  *
  * Sits beside the coverage bar because it answers the same question on a different axis:
@@ -504,7 +568,6 @@ function corpusSection(c: CorpusReport): string {
 function sessionSection(s: SessionReport, idx: number): string {
   const wall = s.endedAt - s.startedAt;
   const cons = s.conservation;
-  const exact = cons.callsExact === cons.callsChecked;
   return `<article class="session" id="s-${idx}" data-panel="${idx}">
     <header class="masthead">
       <div class="mh-left">
@@ -544,12 +607,7 @@ function sessionSection(s: SessionReport, idx: number): string {
       ${coverageBar(s.coverage)}
       <div class="checks">
         ${pricingCheck(s.pricing, s.output)}
-        <div class="check ${exact ? 'ok' : 'warn'}">
-          <b>${exact ? 'Residency reconstruction is exact' : 'Residency reconstruction does not reconcile'}</b>
-          <p>Two independent routes to total cache-read — the API's own reported figure
-          (${n(cons.actualCacheRead)}) and the residency model's prediction (${n(cons.predictedCacheRead)}) —
-          agree on <b>${cons.callsExact} of ${cons.callsChecked}</b> calls individually.</p>
-        </div>
+        ${residencyCheck(cons)}
         ${arenaBasisCheck(s.arenaBasis)}
         <div class="check note">
           <b>Parse</b>

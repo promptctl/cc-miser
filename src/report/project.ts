@@ -248,8 +248,10 @@ export function projectSession(a: AnalyzedSession, models: ModelTable): SessionR
     conservation: {
       actualCacheRead: a.conservation.actualCacheRead,
       predictedCacheRead: a.conservation.predictedCacheRead,
-      callsChecked: a.conversation.calls.length,
+      callsChecked: a.conservation.predictableCalls,
       callsExact: a.conservation.exactCalls,
+      rootCalls: a.conversation.calls.length,
+      hasSpawnedWork: a.forest.placed.length > 0,
     },
     coverage,
     arenaBasis: arenaBasisOf(a.conversation.arrivals),

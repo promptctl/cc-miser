@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test, describe } from 'bun:test';
 import { discoverSessions, projectsRoot, type SessionSource } from '../src/discover.ts';
+import { auditCorpus, describeAudit } from '../src/invariants.ts';
 import { depthOf } from '../src/lineage.ts';
 import { analyzeSession, type AnalyzedSession } from '../src/session.ts';
 import { allCalls, rollup } from '../src/spans.ts';
@@ -75,6 +76,10 @@ const scanned: AnalyzedSession[] =
     : [];
 
 describe.skipIf(choice.kind === 'skip')('the pipeline survives a real corpus', () => {
+  // Computed once here rather than in each test that needs it: it's a full pass over the
+  // whole corpus, and the two tests below both need its result.
+  const audits = auditCorpus(scanned);
+
   test('every discovered session analyses end to end', () => {
     // The scan itself is the assertion: `analyzeSession` parses, groups, resolves the
     // forest, classifies, builds the tree and checks the activity partition, throwing on
@@ -116,6 +121,42 @@ describe.skipIf(choice.kind === 'skip')('the pipeline survives a real corpus', (
       return inTree.length !== expectedCalls || new Set(inTree.map((c) => c.id)).size !== inTree.length;
     });
     expect(wrong.map((s) => s.source.sessionId)).toEqual([]);
+  });
+
+  test('every conservation identity holds across the whole corpus', () => {
+    // WHAT THIS ADDS to the structural claims above. Those ask whether the pipeline's
+    // parts agree about SHAPE — that a call is in the tree exactly once, that a label
+    // exists for it. These ask whether they agree about NUMBERS, and two of them close
+    // against figures the pipeline never derived: the per-TTL cache-creation breakdown in
+    // the same API usage block, and the cache_read of the call before. An identity that
+    // only checks this pipeline against another computation of this pipeline cannot catch
+    // a wrong belief they share, and this project has already paid for that lesson once.
+    //
+    // Each identity carries its own tolerance and the measurement behind it, so a row
+    // stating a law and a row stating a regularity are asserted by the same expression.
+    // [LAW:dataflow-not-control-flow]
+    for (const a of audits) console.log(describeAudit(a));
+    expect(audits.filter((a) => !a.held).map((a) => a.identity.name)).toEqual([]);
+  });
+
+  test('the identities actually ran, in aggregate — a scan that produced no claims at all certified nothing', () => {
+    // [LAW:no-silent-failure] A corpus that yielded no claims anywhere would make every
+    // identity above pass vacuously, reporting success for work that never happened. The
+    // scan is only evidence if SOMETHING had something to examine.
+    //
+    // Checked in aggregate rather than per-identity, because several identities need a
+    // specific pattern to produce even one claim: cache-creation-accounted needs a call
+    // whose adopted line carries a per-TTL breakdown; cache-read-recurrence and
+    // residency-predicts-cache-read need a multi-call epoch where the cached prefix
+    // survived a boundary; output-snapshot-agrees needs a multi-line (streaming) request
+    // group. A small, entirely real corpus — a handful of short sessions, the "machine
+    // that ran Claude Code a few times" `chooseCorpus` distinguishes from "never run at
+    // all" — can legitimately contain zero occurrences of any ONE of those patterns while
+    // the rest of this suite passes cleanly. Per-identity zero-sites would then read as a
+    // regression when nothing is actually wrong. `describeAudit` above still prints every
+    // identity's site count for a human to notice a suspicious 0.
+    const totalSites = audits.reduce((a, x) => a + x.sites, 0);
+    expect(totalSites).toBeGreaterThan(0);
   });
 
   test('no session bills negative tokens', () => {
