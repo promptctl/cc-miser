@@ -324,7 +324,7 @@ function coverageBar(cov: Coverage): string {
  * with calls where every one of them opened its own epoch (`rootCalls > 0`). Conflating
  * them would print "every call here opened its own epoch" for a session with no calls
  * to have done so. [LAW:no-silent-failure] */
-function residencyCheck(cons: Conservation): string {
+export function residencyCheck(cons: Conservation): string {
   const status =
     cons.rootCalls === 0
       ? 'no-calls'
