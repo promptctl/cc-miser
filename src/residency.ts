@@ -63,56 +63,96 @@ export interface PerCallCheck {
   expected: number;
   actual: number;
   delta: number;
+  /** False for a call at its own epoch's start: there `expected` reduces to the call's
+   * own reported `cacheRead` with nothing added, so it equals `actual` by construction
+   * rather than by the model predicting anything. Kept in `perCall` because it's still a
+   * real term of `predictedCacheRead` — the aggregate sum isn't inflated by it, since
+   * `actualCacheRead` sums the identical value on the other side — but excluded from
+   * `exactCalls`, where counting a call the model never predicted would pass off copying
+   * as evidence of predictive accuracy. [LAW:no-silent-failure] */
+  predictable: boolean;
 }
 
 export interface ConservationCheck {
   actualCacheRead: number;
   predictedCacheRead: number;
   perCall: PerCallCheck[];
-  /** Calls where the model's prediction was exactly right, to the token. */
+  /** Calls where the model's prediction was exactly right, to the token — counted only
+   * among `predictable` calls. */
   exactCalls: number;
+  /** How many calls were eligible to count toward `exactCalls`, i.e. `predictable` ones.
+   * The correct denominator for the trust ratio; `perCall.length` also includes the
+   * epoch-openers that can only ever match. */
+  predictableCalls: number;
 }
 
 /** THE CONSERVATION CHECK.
  *
  * Two independent routes to one quantity, both built only from exact API numbers.
  * Route A sums the reported `cache_read`. Route B predicts it from the residency
- * model: everything written at call i is re-read by every later call in i's epoch. If
- * the model is right they agree; the gap measures what the model fails to explain, and
- * is reported rather than hidden. [LAW:no-silent-failure]
+ * model: an epoch opens on whatever prefix survived into it, and everything written at
+ * call i is re-read by every later call in i's epoch. If the model is right they agree;
+ * the gap measures what the model fails to explain, and is reported rather than hidden.
+ * [LAW:no-silent-failure]
  *
- * The PER-CALL result is the real evidence. Aggregate agreement is weak — two wrong
- * numbers can cancel across 28 calls — so the strong claim is that EVERY call's
- * cache_read equals the sum of every earlier cache_creation in its epoch. It held on
- * 28 of 28 calls of the hand-traced specimen, which is why residency-derived numbers
- * are allowed downstream at all. */
+ * THE BASE TERM IS NOT OPTIONAL, and leaving it out is the most expensive thing this
+ * file has done. The model previously predicted a call's `cache_read` from prior
+ * cache_creation ALONE, which is the same equation with `cache_read(epochStart)` assumed
+ * to be zero. It recorded, as its licence for every residency-derived number downstream,
+ * that it "held on 28 of 28 calls of the hand-traced specimen" — and it did, because that
+ * specimen opened cold. On the corpus scanned when this fix landed (47,782 calls) it held
+ * on only 26.2% without the base term; 56.3% of epochs opened on a prefix that survived,
+ * and for each of those the prediction was short by the whole surviving prefix, on every
+ * call in the epoch.
+ *
+ * WITH the base term restored, re-measured on a LATER scan of 42,642 calls (corpus size
+ * moves between scans; the 47,782 above and the 42,642 here are two different snapshots,
+ * not the same population before and after) — 84.3% match INCLUDING epoch-openers, which
+ * match trivially by construction (see `PerCallCheck.predictable` below) and so cannot be
+ * evidence of anything; over the 41,886 predictable calls only — the honest population —
+ * it's 84.0%. That predictable-only figure is what `src/invariants.ts`'s
+ * `residency-predicts-cache-read` basis states and measures, and the one to trust; expect
+ * both numbers here to drift on the next re-measurement, since the corpus this comment
+ * reads is live. A theorem checked on the one specimen that cannot disprove it is not
+ * checked.
+ *
+ * WHAT THE REMAINING 15% IS. The per-call form is cumulative: one bad boundary poisons
+ * every later call in its epoch. Stated LOCALLY instead — each call's `cache_read` equals
+ * the previous call's `cache_read` plus what the previous call wrote — the same model
+ * holds on 99.15% of 46,462 boundaries. `src/invariants.ts` checks the local form for
+ * exactly that reason: it names the one boundary that broke rather than the fifty calls
+ * downstream of it.
+ *
+ * NOT EVERY CALL IS A PREDICTION. A call at its own epoch's start has no prior call in
+ * the same epoch to predict it from, so `expected` reduces to that call's own
+ * `cacheRead` compared to itself. See `PerCallCheck.predictable`. */
 export function conservation(calls: readonly Call[], r: Residency): ConservationCheck {
   const perCall = calls.map((c) => {
     const e = r.epochs[r.epochOfCall[c.index]!]!;
-    const expected = calls
-      .slice(e.start, c.index)
-      .reduce((a, prior) => a + prior.usage.cacheCreation, 0);
+    const expected =
+      calls[e.start]!.usage.cacheRead +
+      calls.slice(e.start, c.index).reduce((a, prior) => a + prior.usage.cacheCreation, 0);
     return {
       call: c.index,
       expected,
       actual: c.usage.cacheRead,
       delta: c.usage.cacheRead - expected,
+      predictable: c.index !== e.start,
     };
   });
+  const predictable = perCall.filter((p) => p.predictable);
   return {
     actualCacheRead: calls.reduce((a, c) => a + c.usage.cacheRead, 0),
-    predictedCacheRead: calls.reduce(
-      (a, c) => a + c.usage.cacheCreation * readsAfter(c.index, r),
-      0,
-    ),
+    // [LAW:one-source-of-truth] Summed from `perCall` rather than derived a second way
+    // from the epoch spans. The two were independent expressions of one model, free to
+    // disagree about it — and they did, the moment the base term was added to one of
+    // them. The aggregate is a projection of the per-call result, so it cannot drift.
+    predictedCacheRead: perCall.reduce((a, p) => a + p.expected, 0),
     perCall,
-    exactCalls: perCall.filter((p) => p.delta === 0).length,
+    exactCalls: predictable.filter((p) => p.delta === 0).length,
+    predictableCalls: predictable.length,
   };
 }
-
-/** How many later calls re-read what was written at `callIndex`. */
-const readsAfter = (callIndex: number, r: Residency): number =>
-  r.epochs[r.epochOfCall[callIndex]!]!.end - callIndex;
 
 /** True cost of one arrival over its whole life — the number naive accounting misses.
  *

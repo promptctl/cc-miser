@@ -25,12 +25,16 @@
 //   test/corpus-smoke.test.ts           The whole pipeline over a real corpus, asserting
 //     only what a corpus with no declared answers can support — that every session
 //     analyses, and that the tree holds every parsed call exactly once. Skipped, loudly,
-//     on a machine with no corpus.
+//     on a machine with no corpus. Since miser-pipeline-sll.6 it also runs every
+//     identity in src/invariants.ts corpus-wide.
+//   test/invariants.test.ts             The identities themselves: cache-creation-accounted
+//     and cache-read-recurrence close against figures neither this pipeline nor a rival
+//     implementation of it derived — the two independent oracles over corpus-wide
+//     conservation that used to be missing (miser-pipeline-sll.6).
 //
-// STILL UNVERIFIED: the attribution beneath a call (miser-pipeline-sll.3) and the
-// independent oracles over corpus-wide conservation (miser-pipeline-sll.6). The
-// estimator that turns characters into input-side tokens has no measured error bar at
-// all — `estimateTokens` says so at its definition.
+// STILL UNVERIFIED: the attribution beneath a call (miser-pipeline-sll.3). The estimator
+// that turns characters into input-side tokens has no measured error bar at all —
+// `estimateTokens` says so at its definition.
 //
 // Said here rather than left implied: a repo that quietly stops verifying itself is
 // worse off than one that never claimed to. The reason this list is worth keeping true

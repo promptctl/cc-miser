@@ -40,6 +40,14 @@ export interface AssistantLine {
   requestId: string;
   model: string;
   usage: Usage;
+  /** Cache-creation tokens this line's own per-TTL breakdown reports that `usage`
+   * does not account for. See `ParsedUsage`. */
+  unaccountedCacheCreation: number;
+  /** Whether this line's `usage` block carried a `cache_creation` breakdown at all.
+   * False makes `unaccountedCacheCreation` trivially 0 — there was nothing to disagree
+   * with — which is a different fact from a breakdown that was checked and matched. See
+   * `ParsedUsage`. */
+  hasCacheCreationBreakdown: boolean;
   blocks: ContentBlock[];
 }
 
@@ -192,13 +200,43 @@ function toolInputText(input: Json): string {
   return first || `${jsonChars(input)} chars`;
 }
 
-function parseUsage(raw: unknown): Usage {
+/** The usage vector, plus whether it is a COMPLETE account of what the line reported.
+ *
+ * The API states cache creation twice in one block: once as the flat
+ * `cache_creation_input_tokens` that every downstream cost is computed from, and once as
+ * a `cache_creation` object broken out per TTL tier. Two maps of one fact, and a map that
+ * can drift will. [FRAMING:representation] */
+interface ParsedUsage {
+  usage: Usage;
+  /** Cache-creation tokens the per-tier breakdown reports that the flat field does not
+   * total. Zero on all 91,301 blocks carrying a breakdown today — and also, trivially,
+   * on every block with no breakdown at all. See `hasCacheCreationBreakdown`. */
+  unaccountedCacheCreation: number;
+  /** Whether `u.cache_creation` was present, i.e. whether `unaccountedCacheCreation`
+   * reflects a real comparison rather than "nothing to compare". */
+  hasCacheCreationBreakdown: boolean;
+}
+
+function parseUsage(raw: unknown): ParsedUsage {
   const u = asObj(raw) ?? {};
+  const cacheCreation = num(u.cache_creation_input_tokens);
+  // EVERY numeric member is summed, not the two tier names observed so far. A tier this
+  // parser has never heard of must not become invisible by virtue of being unnamed here —
+  // that is the drift this check exists to hear about. A block with no breakdown at all
+  // states nothing to disagree with, and so contributes the flat figure itself.
+  const tiers = asObj(u.cache_creation);
+  const brokenOut = tiers
+    ? Object.values(tiers).reduce((a: number, v) => a + num(v), 0)
+    : cacheCreation;
   return {
-    input: num(u.input_tokens),
-    cacheCreation: num(u.cache_creation_input_tokens),
-    cacheRead: num(u.cache_read_input_tokens),
-    output: num(u.output_tokens),
+    usage: {
+      input: num(u.input_tokens),
+      cacheCreation,
+      cacheRead: num(u.cache_read_input_tokens),
+      output: num(u.output_tokens),
+    },
+    unaccountedCacheCreation: brokenOut - cacheCreation,
+    hasCacheCreationBreakdown: tiers !== null,
   };
 }
 
@@ -216,6 +254,7 @@ export function parseLine(raw: unknown): SessionLine {
     case 'assistant': {
       const msg = asObj(o.message) ?? {};
       const content = Array.isArray(msg.content) ? msg.content : [];
+      const parsed = parseUsage(msg.usage);
       return {
         kind: 'assistant',
         uuid,
@@ -224,7 +263,9 @@ export function parseLine(raw: unknown): SessionLine {
         // per-response constant, uuid the last resort (degrades to no dedup).
         requestId: str(o.requestId) || str(msg.id) || uuid,
         model: str(msg.model, '(unknown-model)'),
-        usage: parseUsage(msg.usage),
+        usage: parsed.usage,
+        unaccountedCacheCreation: parsed.unaccountedCacheCreation,
+        hasCacheCreationBreakdown: parsed.hasCacheCreationBreakdown,
         blocks: content.map(parseBlock),
       };
     }
