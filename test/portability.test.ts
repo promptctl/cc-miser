@@ -22,7 +22,7 @@ import { analyzeSession } from '../src/session.ts';
 import { workspaceKey, workspaceOf } from '../src/workspace.ts';
 import { projectSession } from '../src/report/project.ts';
 import { renderCorpus } from '../src/report/render.ts';
-import { readArgs } from '../src/report/args.ts';
+import { COMMAND_NAMES, readArgs } from '../src/cli/args.ts';
 import { ZERO_PRICES, PRICE_SOURCE } from '../src/models.ts';
 import { ZERO_OUTPUT } from '../src/output.ts';
 import { eqCost } from '../src/tokens.ts';
@@ -170,31 +170,27 @@ describe('the corpus location is overridable, and never silently wrong', () => {
   });
 });
 
-describe('arguments are parsed, not guessed at', () => {
-  test('defaults with no arguments', () => {
-    expect(readArgs([])).toEqual({ projects: null, limit: 24 });
+describe('the corpus a run reads is the one it was told to read', () => {
+  // The rest of the argument grammar lives in test/cli.test.ts. What belongs HERE is
+  // only the machine-independence half: that `--projects` reaches the scope every
+  // command scans, so a run can be pointed at an archive instead of this developer's
+  // home directory.
+  /** The scope of a command that reads a corpus. `help` reads none, and the type says
+   * so, which is why this cannot simply reach for `.scope`. */
+  const projectsOf = (argv: readonly string[]): string | null => {
+    const c = readArgs(argv);
+    if (c.kind === 'help') throw new Error(`\`${argv[0]}\` reads no corpus`);
+    return c.scope.projects;
+  };
+  const CORPUS_COMMANDS = COMMAND_NAMES.filter((n) => n !== 'help');
+
+  test('--projects reaches the scope of every corpus command', () => {
+    for (const kind of CORPUS_COMMANDS)
+      expect(projectsOf([kind, '--projects', '/mnt/archive'])).toBe('/mnt/archive');
   });
 
-  test('both flags are read', () => {
-    expect(readArgs(['--projects', '/mnt/archive', '--limit', '5'])).toEqual({
-      projects: '/mnt/archive',
-      limit: 5,
-    });
-  });
-
-  test('an unrecognised flag stops the run', () => {
-    // A typo'd flag that was ignored would produce a full, plausible report from the
-    // wrong directory. [LAW:no-silent-failure]
-    expect(() => readArgs(['--project', '/mnt/archive'])).toThrow(/unrecognised/);
-  });
-
-  test('a flag with no value stops the run', () => {
-    expect(() => readArgs(['--projects'])).toThrow(/needs a value/);
-  });
-
-  test('a limit that is not a positive whole number stops the run', () => {
-    expect(() => readArgs(['--limit', 'lots'])).toThrow(/positive whole number/);
-    expect(() => readArgs(['--limit', '0'])).toThrow(/positive whole number/);
+  test('with no --projects the scope defers to this machine, and says so with null', () => {
+    for (const kind of CORPUS_COMMANDS) expect(projectsOf([kind])).toBeNull();
   });
 });
 

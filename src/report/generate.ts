@@ -1,8 +1,11 @@
-// Drive the pipeline over the corpus and write the report.
+// Drive the pipeline over the corpus and assemble the report.
 //
-// [LAW:effects-at-boundaries] All the I/O in the report path lives here: discover
-// sessions, read transcripts, write one HTML file. The analysis and the renderer stay
-// pure functions on either side of it.
+// [LAW:effects-at-boundaries] Pure, all of it. Reading a transcript is `readText`, a
+// parameter, and writing the artifacts belongs to `src/cli/main.ts` — the one edge in
+// this path that touches the filesystem. This module used to call `main()` at the top
+// level, which made a full corpus scan of the developer's own machine a side effect of
+// importing it; miser-portability-adi.3 moved argument parsing out to escape that, and
+// miser-pipeline-sll.4 moved the effects out to end it.
 //
 // [LAW:one-source-of-truth] The producer is `src/` — the same primitives any other
 // consumer would call. An oracle that produces cannot check itself, so nothing on this
@@ -31,6 +34,10 @@
 //     and cache-read-recurrence close against figures neither this pipeline nor a rival
 //     implementation of it derived — the two independent oracles over corpus-wide
 //     conservation that used to be missing (miser-pipeline-sll.6).
+//   test/cli.test.ts                    The command contract (miser-pipeline-sll.4): which
+//     sessions a scope selects, what lands on stdout against stderr, the exit code a
+//     script reads, and — for this file — that a rendered page states BOTH narrowings it
+//     went through, the scope the caller typed and the band `select` applies.
 //   test/attribution.test.ts            Attribution beneath a call (miser-pipeline-sll.3):
 //     causes bucketed by source and label, priced as fresh writes, reconciled against
 //     input + cacheCreation with an explicit unattributed remainder. corpus-smoke.test.ts
@@ -52,18 +59,14 @@
 // is that the first run of the corpus scan above found 130 calls — 3.1M
 // input-equivalent tokens — that the span tree had been silently dropping.
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { buildConversation } from '../calls.ts';
-import { discoverSessions, hasSpawns, projectsRoot, type SessionSource } from '../discover.ts';
+import { hasSpawns, type SessionSource } from '../discover.ts';
 import { fitTokenizers, PRICE_SOURCE, addPrices, ZERO_PRICES, type ModelTable } from '../models.ts';
 import { addOutput, calibrationGroup, ZERO_OUTPUT } from '../output.ts';
 import { parseTranscript } from '../records.ts';
-import { analyzeSession } from '../session.ts';
+import { analyzeSession, type ReadText } from '../session.ts';
 import { eqCost } from '../tokens.ts';
-import { readArgs } from './args.ts';
 import { projectSession } from './project.ts';
-import { renderCorpus } from './render.ts';
 import type {
   Calibration,
   CorpusReport,
@@ -73,14 +76,6 @@ import type {
   SessionReport,
   Tier,
 } from './model.ts';
-
-// Generated output, never checked in. It used to land in `examples/report/`, which put
-// build output and hand-authored specimen artifacts in one directory under one name —
-// two concerns sharing a home. [LAW:decomposition] The specimen is gone; the joint the
-// two were sharing is now cut, and `out/` says what this is.
-const OUT = join(import.meta.dirname, '..', '..', 'out');
-
-const readText = (p: string): string => readFileSync(p, 'utf8');
 
 const countLines = (text: string): number => {
   let n = 0;
@@ -100,8 +95,9 @@ const countLines = (text: string): number => {
  * caption beside a filter is a second copy with a schedule, and the next person to tune
  * `MAX_LINES` would not think to go and edit prose in the renderer. So the filter states
  * what it did, in the same expression that does it, and the page renders that. */
-function select(
+export function select(
   sources: readonly SessionSource[],
+  readText: ReadText,
   limit: number,
 ): { picked: SessionSource[]; criteria: string[] } {
   const MIN_LINES = 60;
@@ -169,7 +165,7 @@ function select(
  * transcript that will not parse is a pipeline bug and is thrown, not skipped — a
  * calibration quietly fit on the subset of files that happened to open is exactly the
  * kind of number nobody can check. */
-function calibrate(sources: readonly SessionSource[], readText: (p: string) => string): ModelTable {
+export function calibrate(sources: readonly SessionSource[], readText: ReadText): ModelTable {
   const groups = sources.flatMap((s) =>
     [s.path, ...s.subagents.map((a) => a.transcriptPath)].map((path) => {
       try {
@@ -250,29 +246,17 @@ function corpusCoverage(sessions: readonly SessionReport[]): Coverage {
   };
 }
 
-function main(): void {
-  const { projects, limit } = readArgs(process.argv.slice(2));
-  const root = projectsRoot(projects, process.env);
-  mkdirSync(OUT, { recursive: true });
-
-  const sources = discoverSessions(root);
-  console.log(`scanning ${root}: ${sources.length} sessions`);
-
-  const models = calibrate(sources, readText);
-  console.log(
-    `calibrated ${models.tokenizers.size} of ${models.seen.length} model ids: ${[...models.tokenizers]
-      .map(([m, f]) => `${m} ${f.charsPerToken.toFixed(2)}c/t ${(f.heldOutError * 100).toFixed(1)}%`)
-      .join(', ')}`,
-  );
-
-  const { picked, criteria } = select(sources, limit);
-  const selection: Selection = {
-    discovered: sources.length,
-    rendered: picked.length,
-    criteria,
-  };
-  console.log(`analyzing ${picked.length} sessions...`);
-
+/** Analyse every picked session and project it into the report model.
+ *
+ * `onSession` is how a caller shows progress without this function knowing that a
+ * terminal exists. [LAW:effects-at-boundaries] It has no default: a no-op default would
+ * make "silently produced no progress" and "deliberately quiet" the same call. */
+export function analyzeAll(
+  picked: readonly SessionSource[],
+  readText: ReadText,
+  models: ModelTable,
+  onSession: (source: SessionSource) => void,
+): SessionReport[] {
   const sessions: SessionReport[] = [];
   for (const source of picked) {
     // [LAW:no-silent-failure] No catch that turns a failure into a skip. A session
@@ -282,18 +266,29 @@ function main(): void {
     try {
       sessions.push(projectSession(analyzeSession(source, readText), models));
     } catch (e) {
-      throw new Error(`failed to analyze ${source.path}: ${e instanceof Error ? e.message : String(e)}`, {
-        cause: e,
-      });
+      throw new Error(
+        `failed to analyze ${source.path}: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
+      );
     }
-    process.stdout.write('.');
+    onSession(source);
   }
-  console.log();
+  return sessions;
+}
 
-  sessions.sort((a, b) => b.pricing.usd - a.pricing.usd);
-
-  const corpus: CorpusReport = {
-    generatedAt: Date.now(),
+/** Roll the per-session reports into the one object every renderer is a function of.
+ *
+ * `now` is a parameter rather than a `Date.now()` call, so this is a pure function of
+ * its inputs and a test can assert on the whole object. [LAW:effects-at-boundaries] */
+export function buildCorpus(
+  analyzed: readonly SessionReport[],
+  selection: Selection,
+  models: ModelTable,
+  now: number,
+): CorpusReport {
+  const sessions = [...analyzed].sort((a, b) => b.pricing.usd - a.pricing.usd);
+  return {
+    generatedAt: now,
     sessions,
     selection,
     // The titles say WHAT is bucketed, never how much of the corpus is in the bucket.
@@ -333,29 +328,4 @@ function main(): void {
     // reasoning" — a ratio of two totals, not an average of ratios.
     output: sessions.reduce((a, s) => addOutput(a, s.output), ZERO_OUTPUT),
   };
-
-  const out = join(OUT, 'index.html');
-  writeFileSync(out, renderCorpus(corpus));
-  writeFileSync(join(OUT, 'corpus.json'), JSON.stringify(corpus, null, 2));
-
-  console.log(`${sessions.length} sessions rendered`);
-  console.log(
-    `corpus total: $${corpus.pricing.usd.toFixed(2)} / ${corpus.total.value.toLocaleString()} tok-eq`,
-  );
-  // Printed at zero as well, so a clean run and an unchecked one are distinguishable.
-  console.log(
-    `unpriced: ${corpus.pricing.unpricedSpend.toLocaleString()} tok-eq across ${corpus.pricing.unpricedCalls} calls` +
-      `${corpus.pricing.unpriced.length ? ` (${corpus.pricing.unpriced.map((u) => u.model).join(', ')})` : ''}` +
-      ` · uncalibrated output: ${corpus.output.uncalibrated.toLocaleString()} tokens across ${corpus.output.uncalibratedCalls} calls` +
-      `${corpus.output.uncalibratedModels.length ? ` (${corpus.output.uncalibratedModels.join(', ')})` : ''}`,
-  );
-  console.log(
-    `coverage: ${Object.entries(corpus.coverage.byTier)
-      .filter(([, v]) => v > 0.001)
-      .map(([k, v]) => `${k} ${(v * 100).toFixed(0)}%`)
-      .join(', ')}`,
-  );
-  console.log(`-> ${out} (${(readFileSync(out).length / 1024).toFixed(0)} KB)`);
 }
-
-main();

@@ -9,7 +9,15 @@
 import type { AnalyzedSession } from '../session.ts';
 import { isSessionControl, type Arrival, type Turn } from '../calls.ts';
 import { invalidationExcess, trueCost } from '../residency.ts';
-import { allCalls, isSpawned, isToolSpan, rollup, rollupWhere, type Span } from '../spans.ts';
+import {
+  allCalls,
+  billableOf,
+  isSpawned,
+  isToolSpan,
+  rollup,
+  rollupWhere,
+  type Span,
+} from '../spans.ts';
 import { depthOf } from '../lineage.ts';
 import {
   CACHE_READ_MULTIPLE,
@@ -62,10 +70,10 @@ export function projectSession(a: AnalyzedSession, models: ModelTable): SessionR
   const grandTotal = spend(exact);
 
   const calls: CallRow[] = callSpans.map((s) => ({
+    // [LAW:one-source-of-truth] model, ts and usage come from the one reduction the CLI
+    // prices by too, rather than being re-picked off the span here.
+    ...billableOf(s),
     index: s.callFirst,
-    ts: s.tStart,
-    model: s.detail.model,
-    usage: s.detail.usage,
     depth: depthOf(s.lineage),
     lineage: s.lineage.map((sp) => ({ ...sp })),
     label: s.detail.label,
