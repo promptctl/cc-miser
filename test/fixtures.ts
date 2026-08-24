@@ -358,7 +358,10 @@ export const usageBlockSession = (
       line({
         type: 'assistant',
         uuid: `q${String(k + 2).padStart(4, '0')}`,
-        timestamp: `2026-01-01T00:01:${String(k).padStart(2, '0')}.000Z`,
+        // Date.UTC rolls a seconds value >= 60 into the next minute rather than
+        // producing an invalid string `Date.parse` would silently read as ts: 0, so this
+        // stays correct for a future caller passing 60+ usage snapshots.
+        timestamp: new Date(Date.UTC(2026, 0, 1, 0, 1, k)).toISOString(),
         sessionId,
         cwd: FOREIGN_CWD,
         // One requestId across every block: these are the lines of ONE call, which is
