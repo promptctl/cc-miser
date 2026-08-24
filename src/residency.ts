@@ -63,14 +63,27 @@ export interface PerCallCheck {
   expected: number;
   actual: number;
   delta: number;
+  /** False for a call at its own epoch's start: there `expected` reduces to the call's
+   * own reported `cacheRead` with nothing added, so it equals `actual` by construction
+   * rather than by the model predicting anything. Kept in `perCall` because it's still a
+   * real term of `predictedCacheRead` — the aggregate sum isn't inflated by it, since
+   * `actualCacheRead` sums the identical value on the other side — but excluded from
+   * `exactCalls`, where counting a call the model never predicted would pass off copying
+   * as evidence of predictive accuracy. [LAW:no-silent-failure] */
+  predictable: boolean;
 }
 
 export interface ConservationCheck {
   actualCacheRead: number;
   predictedCacheRead: number;
   perCall: PerCallCheck[];
-  /** Calls where the model's prediction was exactly right, to the token. */
+  /** Calls where the model's prediction was exactly right, to the token — counted only
+   * among `predictable` calls. */
   exactCalls: number;
+  /** How many calls were eligible to count toward `exactCalls`, i.e. `predictable` ones.
+   * The correct denominator for the trust ratio; `perCall.length` also includes the
+   * epoch-openers that can only ever match. */
+  predictableCalls: number;
 }
 
 /** THE CONSERVATION CHECK.
@@ -97,7 +110,11 @@ export interface ConservationCheck {
  * the previous call's `cache_read` plus what the previous call wrote — the same model
  * holds on 99.15% of 46,462 boundaries. `src/invariants.ts` checks the local form for
  * exactly that reason: it names the one boundary that broke rather than the fifty calls
- * downstream of it. */
+ * downstream of it.
+ *
+ * NOT EVERY CALL IS A PREDICTION. A call at its own epoch's start has no prior call in
+ * the same epoch to predict it from, so `expected` reduces to that call's own
+ * `cacheRead` compared to itself. See `PerCallCheck.predictable`. */
 export function conservation(calls: readonly Call[], r: Residency): ConservationCheck {
   const perCall = calls.map((c) => {
     const e = r.epochs[r.epochOfCall[c.index]!]!;
@@ -109,8 +126,10 @@ export function conservation(calls: readonly Call[], r: Residency): Conservation
       expected,
       actual: c.usage.cacheRead,
       delta: c.usage.cacheRead - expected,
+      predictable: c.index !== e.start,
     };
   });
+  const predictable = perCall.filter((p) => p.predictable);
   return {
     actualCacheRead: calls.reduce((a, c) => a + c.usage.cacheRead, 0),
     // [LAW:one-source-of-truth] Summed from `perCall` rather than derived a second way
@@ -119,7 +138,8 @@ export function conservation(calls: readonly Call[], r: Residency): Conservation
     // them. The aggregate is a projection of the per-call result, so it cannot drift.
     predictedCacheRead: perCall.reduce((a, p) => a + p.expected, 0),
     perCall,
-    exactCalls: perCall.filter((p) => p.delta === 0).length,
+    exactCalls: predictable.filter((p) => p.delta === 0).length,
+    predictableCalls: predictable.length,
   };
 }
 

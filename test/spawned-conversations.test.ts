@@ -783,7 +783,7 @@ describe('the residency model still holds on a session that spawns', () => {
   test('every root call’s cache_read equals what its epoch wrote before it', () => {
     // Two independent routes to one quantity. Aggregate agreement is weak — two wrong
     // numbers cancel — so the claim asserted is the per-call one.
-    expect(analyzed.conservation.exactCalls).toBe(analyzed.conversation.calls.length);
+    expect(analyzed.conservation.exactCalls).toBe(analyzed.conservation.predictableCalls);
     expect(analyzed.conservation.perCall.map((p) => p.delta)).toEqual([0, 0, 0, 0]);
   });
 

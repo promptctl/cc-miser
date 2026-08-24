@@ -548,7 +548,8 @@ function sessionSection(s: SessionReport, idx: number): string {
           <b>${exact ? 'Residency reconstruction is exact' : 'Residency reconstruction does not reconcile'}</b>
           <p>Two independent routes to total cache-read — the API's own reported figure
           (${n(cons.actualCacheRead)}) and the residency model's prediction (${n(cons.predictedCacheRead)}) —
-          agree on <b>${cons.callsExact} of ${cons.callsChecked}</b> calls individually.</p>
+          agree on <b>${cons.callsExact} of ${cons.callsChecked}</b> predictable calls individually
+          (epoch-opening calls, which have nothing to predict from, are excluded).</p>
         </div>
         ${arenaBasisCheck(s.arenaBasis)}
         <div class="check note">

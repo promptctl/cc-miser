@@ -237,25 +237,33 @@ export const IDENTITIES: readonly Identity[] = [
       "the residency model's prediction of each call's cache_read equals the cache_read " +
       'the API reported',
     basis:
-      'MEASURED: exact on 84.6% of 47,782 calls. INTERNAL — it grades this pipeline\'s ' +
-      'own model, so it is weaker evidence than the two rows above and is kept for a ' +
-      'different job: it is the licence every residency-derived number downstream runs ' +
-      'on, and it was previously justified by "28 of 28 calls of the hand-traced ' +
-      'specimen" while scoring 26.2% on the corpus. The rate is set to catch a collapse ' +
-      'back to something like that, not to certify the model. The residual is cumulative ' +
-      'by nature — one bad boundary poisons every later call in its epoch — which is why ' +
-      '`cache-read-recurrence` states the same physics locally and scores 99.15%. ' +
-      'SCOPE, stated so it is not assumed away: this row reads the conservation check the ' +
-      'pipeline STORED, which `analyzeSession` computes for the root conversation only, so ' +
-      'spawned conversations are outside it. They are inside every other row. Residency is ' +
-      'not modelled per subagent yet; when it is, this row widens with it.',
+      'MEASURED: exact on 83.7% of 41,067 PREDICTABLE calls — epoch-opening calls are ' +
+      'excluded (`PerCallCheck.predictable`), because there `expected` reduces to the ' +
+      "call's own reported value with nothing added, so it matches by construction and " +
+      'is not a genuine prediction; counting it would inflate this rate with calls the ' +
+      "model never actually predicted. INTERNAL — it grades this pipeline's own model, " +
+      'so it is weaker evidence than the two rows above and is kept for a different job: ' +
+      'it is the licence every residency-derived number downstream runs on, and it was ' +
+      'previously justified by "28 of 28 calls of the hand-traced specimen" while ' +
+      'scoring 26.2% on the corpus (that figure and the one in residency.ts predate the ' +
+      'predictable/not split and are stated over all calls, not just predictable ones). ' +
+      'The rate is set to catch a collapse back to something like that, not to certify ' +
+      'the model. The residual is cumulative by nature — one bad boundary poisons every ' +
+      'later call in its epoch — which is why `cache-read-recurrence` states the same ' +
+      'physics locally and scores 99.15%. SCOPE, stated so it is not assumed away: this ' +
+      'row reads the conservation check the pipeline STORED, which `analyzeSession` ' +
+      'computes for the root conversation only, so spawned conversations are outside it. ' +
+      'They are inside every other row. Residency is not modelled per subagent yet; when ' +
+      'it is, this row widens with it.',
     maxViolationRate: 0.3,
     claims: (s) =>
-      s.conservation.perCall.map((p) => ({
-        site: `root call ${p.call}: predicted vs reported cache_read`,
-        left: p.actual,
-        right: p.expected,
-      })),
+      s.conservation.perCall
+        .filter((p) => p.predictable)
+        .map((p) => ({
+          site: `root call ${p.call}: predicted vs reported cache_read`,
+          left: p.actual,
+          right: p.expected,
+        })),
   },
 ];
 
