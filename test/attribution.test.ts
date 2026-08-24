@@ -67,7 +67,14 @@ describe('attributeConversation — hand-built numbers', () => {
     // call 0: one cause (the opening user text), reconciled against input + cacheCreation
     // at write price. estimateTokens(40) = 10, so the bucket costs 10 * 1.25.
     expect(call0!.causes).toEqual([
-      { source: 'userText', label: 'user text', arrivals: 1, estTokens: 10, cost: 12.5 },
+      {
+        source: 'userText',
+        label: 'user text',
+        arrivals: 1,
+        estTokens: 10,
+        cost: 12.5,
+        basis: 'estimated-from-chars',
+      },
     ]);
     expect(call0!.exactCost).toBe(5 + 1000 * WRITE_MULTIPLE); // 1255
     expect(call0!.causedCost).toBe(12.5);
@@ -78,22 +85,32 @@ describe('attributeConversation — hand-built numbers', () => {
     // arrivals themselves carry.
     expect(call1!.causes).toHaveLength(3);
     const byLabel = Object.fromEntries(call1!.causes.map((c) => [c.label, c]));
-    expect(byLabel['Read']).toEqual({ source: 'toolResult', label: 'Read', arrivals: 2, estTokens: 30, cost: 37.5 });
+    expect(byLabel['Read']).toEqual({
+      source: 'toolResult',
+      label: 'Read',
+      arrivals: 2,
+      estTokens: 30,
+      cost: 37.5,
+      basis: 'estimated-from-chars',
+    });
     expect(byLabel['task_reminder']).toEqual({
       source: 'attachment',
       label: 'task_reminder',
       arrivals: 1,
       estTokens: 30,
       cost: 37.5,
+      basis: 'estimated-from-chars',
     });
     // Prior output carries an EXACT size (call 0's own billed output_tokens), not an
-    // estimate — the one bucket in this fixture with no chars/4 involved at all.
+    // estimate — the one bucket in this fixture with no chars/4 involved at all, and the
+    // one bucket whose `basis` differs from every other source.
     expect(byLabel['prior output']).toEqual({
       source: 'assistantOutput',
       label: 'prior output',
       arrivals: 1,
       estTokens: 800,
       cost: 1000,
+      basis: 'exact-api-usage',
     });
 
     // call 1's exact cost (5 + 300*1.25 = 380) is far smaller than what its causes claim
@@ -113,7 +130,16 @@ describe('attributeConversation — hand-built numbers', () => {
         [{ bornBeforeCall: 0, source: 'toolResult', label: '?', size: estimatedSize(40), toolUseId: 'ghost' }],
       ),
     )[0]!;
-    expect(a.causes).toEqual([{ source: 'toolResult', label: 'unknown tool', arrivals: 1, estTokens: 10, cost: 12.5 }]);
+    expect(a.causes).toEqual([
+      {
+        source: 'toolResult',
+        label: 'unknown tool',
+        arrivals: 1,
+        estTokens: 10,
+        cost: 12.5,
+        basis: 'estimated-from-chars',
+      },
+    ]);
   });
 
   test('a call with nothing born at it has an empty cause list and remainder equal to its whole exact cost', () => {
@@ -189,6 +215,9 @@ describe('attributeConversation — wired into a real parsed conversation', () =
     expect(bySource['toolResult:Grep']!.arrivals).toBe(1);
     expect(bySource['attachment:task_reminder']!.arrivals).toBe(1);
     expect(bySource['assistantOutput:prior output']!.estTokens).toBe(400); // exact, call 0's billed output
+    expect(bySource['assistantOutput:prior output']!.basis).toBe('exact-api-usage');
+    expect(bySource['toolResult:Read']!.basis).toBe('estimated-from-chars');
+    expect(bySource['attachment:task_reminder']!.basis).toBe('estimated-from-chars');
 
     for (const a of attributions) expect(a.causedCost + a.unattributed).toBeCloseTo(a.exactCost, 9);
   });
