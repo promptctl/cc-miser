@@ -33,7 +33,7 @@ export interface Call {
    * Deliberately order-dependent, which is the whole reason it is a useful rival: `max`
    * is a property of the SET of lines and `last` is a property of their sequence, so the
    * two are computed from genuinely different things and cannot agree by construction.
-   * They agree on all 5,395 streaming groups and part company only where a placeholder
+   * They agree on all 5,449 streaming groups and part company only where a placeholder
    * line carries an all-zero block. That gap is what `src/invariants.ts` watches: the
    * first-line reader that shipped understated the corpus's output by 27.4%, and nothing
    * in this suite could see it, because the only figure kept was the one it produced.
