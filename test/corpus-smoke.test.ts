@@ -76,6 +76,10 @@ const scanned: AnalyzedSession[] =
     : [];
 
 describe.skipIf(choice.kind === 'skip')('the pipeline survives a real corpus', () => {
+  // Computed once here rather than in each test that needs it: it's a full pass over the
+  // whole corpus, and the two tests below both need its result.
+  const audits = auditCorpus(scanned);
+
   test('every discovered session analyses end to end', () => {
     // The scan itself is the assertion: `analyzeSession` parses, groups, resolves the
     // forest, classifies, builds the tree and checks the activity partition, throwing on
@@ -131,7 +135,6 @@ describe.skipIf(choice.kind === 'skip')('the pipeline survives a real corpus', (
     // Each identity carries its own tolerance and the measurement behind it, so a row
     // stating a law and a row stating a regularity are asserted by the same expression.
     // [LAW:dataflow-not-control-flow]
-    const audits = auditCorpus(scanned);
     for (const a of audits) console.log(describeAudit(a));
     expect(audits.filter((a) => !a.held).map((a) => a.identity.name)).toEqual([]);
   });
@@ -140,7 +143,7 @@ describe.skipIf(choice.kind === 'skip')('the pipeline survives a real corpus', (
     // [LAW:no-silent-failure] A corpus that somehow yielded no claims would make every
     // identity above pass vacuously, reporting success for work that never happened. The
     // scan is only evidence if the identities had something to examine.
-    const empty = auditCorpus(scanned).filter((a) => a.sites === 0);
+    const empty = audits.filter((a) => a.sites === 0);
     expect(empty.map((a) => a.identity.name)).toEqual([]);
   });
 
