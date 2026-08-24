@@ -309,15 +309,6 @@ function coverageBar(cov: Coverage): string {
   </div>`;
 }
 
-/** How much of the arena rests on exact numbers rather than on chars/4.
- *
- * Sits beside the coverage bar because it answers the same question on a different axis:
- * coverage says how the page's LABELS were decided, this says how its SIZES were. The
- * stratigraphy stacks one arrival the API measures exactly — every call's assistant
- * output, reasoning included — against three reconstructed from characters, and a
- * picture that does not say which is which invites the reader to trust all of it
- * equally. Stated always, including at 100%, for coverageBar's reason: a figure that
- * appears only when it is bad teaches the reader to read its absence as "fine". */
 /** How much the per-call reconciliation has to say, and what it found.
  *
  * [LAW:types-are-the-program] A four-way status rather than a boolean. `callsChecked
@@ -372,6 +363,15 @@ function residencyCheck(cons: Conservation): string {
   </div>`;
 }
 
+/** How much of the arena rests on exact numbers rather than on chars/4.
+ *
+ * Sits beside the coverage bar because it answers the same question on a different axis:
+ * coverage says how the page's LABELS were decided, this says how its SIZES were. The
+ * stratigraphy stacks one arrival the API measures exactly — every call's assistant
+ * output, reasoning included — against three reconstructed from characters, and a
+ * picture that does not say which is which invites the reader to trust all of it
+ * equally. Stated always, including at 100%, for coverageBar's reason: a figure that
+ * appears only when it is bad teaches the reader to read its absence as "fine". */
 function arenaBasisCheck(b: ArenaBasis): string {
   return `<div class="check note">
     <b>Arena sizes are ${pct(b.exactShare)} exact</b>
