@@ -319,7 +319,7 @@ describe('cache-read-recurrence', () => {
 
 describe('output-snapshot-agrees — the guard on the quantity that was wrong by 27.4%', () => {
   /** Three JSONL lines per call, output ramping 1/3, 2/3, 3/3 as the response streams —
-   * the shape of the 5,395 corpus groups the first-line reader understated. */
+   * the shape of the 5,449 corpus groups the first-line reader understated. */
   const streaming = (): string =>
     buildTranscript({
       sessionId: SESSION_ID,
@@ -362,7 +362,7 @@ describe('output-snapshot-agrees — the guard on the quantity that was wrong by
   });
 
   test('the all-zero placeholder tail is excluded from being a site at all', () => {
-    // The three corpus groups whose final line is a placeholder are why `completeUsage`
+    // The 53 corpus groups whose final line is a placeholder are why `completeUsage`
     // takes the maximum rather than the last. Counting them as sites would make the
     // identity demand the pipeline adopt the very zeros that rule exists to reject.
     const s = analyzed(placeholderTailSession());

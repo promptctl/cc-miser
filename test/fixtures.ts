@@ -197,7 +197,7 @@ export function buildTranscript(spec: TranscriptSpec): string {
     ];
     // `output_tokens` RISES across the group and only the last line carries the finished
     // count, because the writer records a snapshot per block while the response is still
-    // streaming. 5,395 of the corpus's 36,426 request groups look like this.
+    // streaming. 5,449 of the corpus's 48,155 request groups look like this.
     //
     // The earlier version of this fixture repeated ONE usage object verbatim on every
     // line, on the strength of a claim that the writer always does. It does not — and a
