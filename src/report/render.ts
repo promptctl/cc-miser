@@ -18,6 +18,7 @@ import type {
   Activity,
   ArenaBasis,
   Calibration,
+  Conservation,
   CorpusReport,
   Cost,
   Coverage,
@@ -317,6 +318,42 @@ function coverageBar(cov: Coverage): string {
  * picture that does not say which is which invites the reader to trust all of it
  * equally. Stated always, including at 100%, for coverageBar's reason: a figure that
  * appears only when it is bad teaches the reader to read its absence as "fine". */
+/** How much the per-call reconciliation has to say, and what it found.
+ *
+ * [LAW:types-are-the-program] A three-way status rather than a boolean: `callsChecked
+ * === 0` is a distinct state — no predictable calls in this session, so the model made
+ * no individual predictions to check — not a degenerate case of "exact". A session
+ * where every call opened its own epoch would otherwise print a 0-of-0 match through
+ * the same "ok" badge a real reconciliation earns, which is the exact vacuous-match
+ * presentation excluding epoch-openers from `exactCalls` was introduced to eliminate —
+ * just relocated from a guaranteed N-of-N to a guaranteed 0-of-0. [LAW:no-silent-failure] */
+function residencyCheck(cons: Conservation): string {
+  const status =
+    cons.callsChecked === 0 ? 'empty' : cons.callsExact === cons.callsChecked ? 'exact' : 'mismatch';
+  const badge = { empty: 'note', exact: 'ok', mismatch: 'warn' }[status];
+  const headline = {
+    empty: 'No predictable calls in this session',
+    exact: 'Residency reconstruction is exact',
+    mismatch: 'Residency reconstruction does not reconcile',
+  }[status];
+  const detail =
+    status === 'empty'
+      ? `Every call here opened its own epoch — the cached prefix never survived from one
+         call to the next — so the residency model had no individual prediction to make.
+         The two aggregate routes to total cache-read still agree
+         (${n(cons.actualCacheRead)} actual vs ${n(cons.predictedCacheRead)} predicted),
+         but that agreement is trivial with nothing to check it against.`
+      : `Two independent routes to total cache-read — the API's own reported figure
+         (${n(cons.actualCacheRead)}) and the residency model's prediction
+         (${n(cons.predictedCacheRead)}) — agree on <b>${cons.callsExact} of
+         ${cons.callsChecked}</b> predictable calls individually (epoch-opening calls,
+         which have nothing to predict from, are excluded).`;
+  return `<div class="check ${badge}">
+    <b>${headline}</b>
+    <p>${detail}</p>
+  </div>`;
+}
+
 function arenaBasisCheck(b: ArenaBasis): string {
   return `<div class="check note">
     <b>Arena sizes are ${pct(b.exactShare)} exact</b>
@@ -504,7 +541,6 @@ function corpusSection(c: CorpusReport): string {
 function sessionSection(s: SessionReport, idx: number): string {
   const wall = s.endedAt - s.startedAt;
   const cons = s.conservation;
-  const exact = cons.callsExact === cons.callsChecked;
   return `<article class="session" id="s-${idx}" data-panel="${idx}">
     <header class="masthead">
       <div class="mh-left">
@@ -544,13 +580,7 @@ function sessionSection(s: SessionReport, idx: number): string {
       ${coverageBar(s.coverage)}
       <div class="checks">
         ${pricingCheck(s.pricing, s.output)}
-        <div class="check ${exact ? 'ok' : 'warn'}">
-          <b>${exact ? 'Residency reconstruction is exact' : 'Residency reconstruction does not reconcile'}</b>
-          <p>Two independent routes to total cache-read — the API's own reported figure
-          (${n(cons.actualCacheRead)}) and the residency model's prediction (${n(cons.predictedCacheRead)}) —
-          agree on <b>${cons.callsExact} of ${cons.callsChecked}</b> predictable calls individually
-          (epoch-opening calls, which have nothing to predict from, are excluded).</p>
-        </div>
+        ${residencyCheck(cons)}
         ${arenaBasisCheck(s.arenaBasis)}
         <div class="check note">
           <b>Parse</b>
