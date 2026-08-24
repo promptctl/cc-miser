@@ -427,7 +427,7 @@ export interface SessionFixture {
 /** Where a fixture session pretends to live. Never touched; the paths exist only as
  * keys, and mirroring the real layout is what keeps the fixture a map of the territory
  * rather than of a convenient invention. */
-const CORPUS_ROOT = '/corpus';
+export const CORPUS_ROOT = '/corpus';
 
 /** Build a whole session — root transcript, one transcript and one meta file per spawn
  * — into the paths `discover.ts` would have found them at.

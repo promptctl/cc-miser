@@ -80,6 +80,20 @@ export function allCalls(span: Span): CallSpan[] {
 
 export const isCallSpan = (s: Span): s is CallSpan => s.detail.kind === 'call';
 
+/** A call span reduced to what pricing needs: a model, an instant, and a usage vector.
+ *
+ * [LAW:one-source-of-truth] The single place a call span becomes billable. Both the
+ * report's per-session rows and the CLI's per-session lines price the same population
+ * by the same reduction, so "which instant does a rate card apply at" is decided once
+ * here rather than agreed on by two call sites that are free to drift. Typed
+ * structurally rather than as `models.ts`'s `Billable` so this module keeps importing
+ * only from below it. [LAW:one-way-deps] */
+export const billableOf = (s: CallSpan): { model: string; ts: number; usage: Usage } => ({
+  model: s.detail.model,
+  ts: s.tStart,
+  usage: s.detail.usage,
+});
+
 export type ToolSpan = Span & { detail: Extract<SpanDetail, { kind: 'tool' }> };
 export const isToolSpan = (s: Span): s is ToolSpan => s.detail.kind === 'tool';
 

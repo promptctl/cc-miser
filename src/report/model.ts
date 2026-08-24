@@ -252,6 +252,16 @@ export interface SessionReport {
 export interface Selection {
   /** Sessions discovered under the projects root. */
   discovered: number;
+  /** Sessions the command line's scope kept — what the reader ASKED to see, before the
+   * report narrowed again by transcript length and per-project cap.
+   *
+   * [LAW:types-are-the-program] Three facts need three numbers. With only `discovered`
+   * and `rendered`, a scoped run had to misreport one of them: counting the scoped set as
+   * "discovered" falsifies the page's own sentence about what was found under the
+   * projects directory, and leaving it at the machine's total makes a report that showed
+   * every session the reader asked for announce itself as an arbitrary sample. Equal to
+   * `discovered` when no scope flag was given. */
+  inScope: number;
   /** Sessions actually analyzed and rendered here. */
   rendered: number;
   /** Every filter applied, in the selector's own words, with what each one cost.

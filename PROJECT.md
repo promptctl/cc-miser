@@ -199,6 +199,13 @@ A pipeline of five stages, pure after the file reads at the front:
    so re-renders never re-pay.
 5. **render** — pure functions from the tree to the artifacts above.
 
+One command line binds them, and it is the only place that reads transcript contents,
+writes artifacts, asks the clock or sets the exit code — the directory walk is its own
+boundary in `discover.ts`: `list` for a tab-separated row per session,
+`trace` for the span tree as JSON, `report` for the HTML. Run `miser help` for the
+options — the usage text is generated from the command table, so this paragraph does
+not restate it and cannot fall out of step with it.
+
 The profiler (stages 1–3 plus the waterfall and flamegraph) answers "what do I
 spend tokens doing" with real numbers over the full history. The activity layer
 answers "what phase of my process is expensive." Everything past that is leverage
