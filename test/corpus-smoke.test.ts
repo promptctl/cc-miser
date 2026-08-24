@@ -21,6 +21,7 @@ import { readFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test, describe } from 'bun:test';
+import { attributeConversation } from '../src/attribution.ts';
 import { discoverSessions, projectsRoot, type SessionSource } from '../src/discover.ts';
 import { auditCorpus, describeAudit } from '../src/invariants.ts';
 import { depthOf } from '../src/lineage.ts';
@@ -157,6 +158,23 @@ describe.skipIf(choice.kind === 'skip')('the pipeline survives a real corpus', (
     // identity's site count for a human to notice a suspicious 0.
     const totalSites = audits.reduce((a, x) => a + x.sites, 0);
     expect(totalSites).toBeGreaterThan(0);
+  });
+
+  test('every call\'s attribution closes exactly on the exact cost it reconciles against', () => {
+    // `unattributed` is DEFINED as `exactCost - causedCost`, so this holds by construction
+    // — the content of the test is that it holds on the actual shape of a real corpus
+    // (unmatched tool results, zero-arrival calls, merged tool buckets across a real
+    // spawn tree) rather than only on the shapes a fixture happened to construct.
+    // [LAW:no-silent-failure]
+    const bad: string[] = [];
+    for (const s of scanned) {
+      const conversations = [s.conversation, ...s.forest.placed.map((p) => p.conversation)];
+      for (const c of conversations)
+        for (const a of attributeConversation(c))
+          if (Math.abs(a.causedCost + a.unattributed - a.exactCost) > 1e-6)
+            bad.push(`${s.source.sessionId} call ${a.call}`);
+    }
+    expect(bad).toEqual([]);
   });
 
   test('no session bills negative tokens', () => {
