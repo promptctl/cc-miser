@@ -372,6 +372,20 @@ describe('output-snapshot-agrees — the guard on the quantity that was wrong by
     expect(a.sites).toBe(0);
     expect(a.violations).toEqual([]);
   });
+
+  test('a single-line group is not a site — MAX and LAST read the same line, not two', () => {
+    // For lineCount === 1, usage and lastLineUsage are both set from that one line
+    // (calls.ts's fold), so agreement there proves nothing about the two rules being
+    // independent. Counting it as a site would be the same vacuous-match inflation
+    // excluded elsewhere in this file for no-breakdown calls and epoch-openers.
+    const s = analyzed(
+      usageBlockSession([
+        { input_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 50 },
+      ]),
+    );
+    expect(s.conversation.calls[0]!.lineCount).toBe(1);
+    expect(auditOne('output-snapshot-agrees', s).sites).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------------
