@@ -4,9 +4,16 @@ global:
 
 scrape_configs:
   # Where the collector republishes whatever Claude Code sent it.
+  #
+  # The address arrives through file discovery rather than sitting here as a literal,
+  # because Apple's container runtime does not resolve container names between peers
+  # (verified 2026-08-27 on CLI 1.2.2: a peer lookup returns NXDOMAIN) and Prometheus
+  # does not expand environment variables inside this file. telemetry/stack.sh writes
+  # the collector's runtime-assigned address into the file below and owns it alone;
+  # it is generated state, never edited by hand. [LAW:one-source-of-truth]
   - job_name: "otel-collector"
-    static_configs:
-      - targets: ["otel-collector:8889"]
+    file_sd_configs:
+      - files: ["/etc/prometheus/collector-targets.json"]
 
   - job_name: "prometheus"
     static_configs:
