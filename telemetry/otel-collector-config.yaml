@@ -23,7 +23,7 @@ processors:
 exporters:
   # Traces go to Jaeger over OTLP. Jaeger's own OTLP ports are not published to the
   # host, so this address is reachable only inside the compose network.
-  otlp/jaeger:
+  otlp_grpc/jaeger:
     endpoint: jaeger:4317
     tls:
       insecure: true
@@ -46,7 +46,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlp/jaeger]
+      exporters: [otlp_grpc/jaeger]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
