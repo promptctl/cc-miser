@@ -45,20 +45,39 @@ readonly IMAGE_COLLECTOR=docker.io/otel/opentelemetry-collector-contrib:latest
 readonly IMAGE_PROMETHEUS=docker.io/prom/prometheus:latest
 readonly IMAGE_TELEMETRYGEN=ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest
 
-# The host-visible surface, unchanged from the compose stack it replaces. telemetry/
-# README.md's environment-variable instructions were verified correct against a
-# collector listening on exactly these ports, so holding them keeps those instructions
-# true and keeps the runtime swap invisible to everything outside this directory.
-readonly PORT_OTLP_GRPC=4317
-readonly PORT_OTLP_HTTP=4318
-readonly PORT_COLLECTOR_METRICS=8889
-readonly PORT_JAEGER_UI=16686
-readonly PORT_PROMETHEUS=9090
+# Two different facts live here, and they were one constant each until 2026-08-27,
+# when the host numbers had to move and the conflation became a bug waiting to fire.
+# [LAW:one-source-of-truth]
+#
+# CONTAINER_PORT_* is what a service listens on INSIDE its container. This file is not
+# the authority for those: otel-collector-config.yaml declares the collector's receiver
+# and exporter endpoints, and the Jaeger and Prometheus images fix theirs. These
+# constants restate that authority so `up` can wire peers together, and changing one
+# here without changing it there is how you get a container that starts and answers
+# nobody.
+readonly CONTAINER_PORT_OTLP_GRPC=4317
+readonly CONTAINER_PORT_OTLP_HTTP=4318
+readonly CONTAINER_PORT_COLLECTOR_METRICS=8889
+readonly CONTAINER_PORT_JAEGER_UI=16686
+readonly CONTAINER_PORT_PROMETHEUS=9090
 
-# Jaeger's own OTLP receiver port. Deliberately NOT published: the collector owns the one
-# ingest address on this machine, and a second host-visible OTLP port would be a second
-# place to send traces to. [LAW:single-enforcer]
-readonly JAEGER_OTLP_PORT=4317
+# PORT_* is the host-visible surface: which of THIS MACHINE's ports the stack claims.
+# Deliberately not the OTLP defaults. Those defaults are exactly what every other
+# telemetry stack on a developer's machine also wants, and on this one an unrelated
+# project's collector holds 4317, 4318 and 8889 under a restart policy that brings it
+# straight back — so a stack pinned to the defaults is a stack that loses a race it
+# should never have entered. Nothing outside this machine reads these numbers, so
+# yielding the well-known ports costs nothing and ends the collision permanently.
+readonly PORT_OTLP_GRPC=14317
+readonly PORT_OTLP_HTTP=14318
+readonly PORT_COLLECTOR_METRICS=18889
+readonly PORT_JAEGER_UI=17686
+readonly PORT_PROMETHEUS=19090
+
+# Jaeger's own OTLP receiver port. Container-side only, and deliberately NOT published:
+# the collector owns the one ingest address on this machine, and a second host-visible
+# OTLP port would be a second place to send traces to. [LAW:single-enforcer]
+readonly CONTAINER_PORT_JAEGER_OTLP=4317
 
 TELEMETRY_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly TELEMETRY_DIR
@@ -191,7 +210,7 @@ cmd_up() {
   # [LAW:no-ambient-temporal-coupling]
   say "starting $JAEGER"
   run_detached "$JAEGER" \
-    --publish "$PORT_JAEGER_UI:$PORT_JAEGER_UI" \
+    --publish "$PORT_JAEGER_UI:$CONTAINER_PORT_JAEGER_UI" \
     --env COLLECTOR_OTLP_ENABLED=true \
     "$IMAGE_JAEGER"
   local jaeger_addr
@@ -200,10 +219,10 @@ cmd_up() {
 
   say "starting $COLLECTOR"
   run_detached "$COLLECTOR" \
-    --publish "$PORT_OTLP_GRPC:$PORT_OTLP_GRPC" \
-    --publish "$PORT_OTLP_HTTP:$PORT_OTLP_HTTP" \
-    --publish "$PORT_COLLECTOR_METRICS:$PORT_COLLECTOR_METRICS" \
-    --env "JAEGER_OTLP_ENDPOINT=$jaeger_addr:$JAEGER_OTLP_PORT" \
+    --publish "$PORT_OTLP_GRPC:$CONTAINER_PORT_OTLP_GRPC" \
+    --publish "$PORT_OTLP_HTTP:$CONTAINER_PORT_OTLP_HTTP" \
+    --publish "$PORT_COLLECTOR_METRICS:$CONTAINER_PORT_COLLECTOR_METRICS" \
+    --env "JAEGER_OTLP_ENDPOINT=$jaeger_addr:$CONTAINER_PORT_JAEGER_OTLP" \
     --volume "$TELEMETRY_DIR/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro" \
     "$IMAGE_COLLECTOR" \
     --config=/etc/otel-collector-config.yaml
@@ -213,11 +232,11 @@ cmd_up() {
 
   mkdir -p "$RUN_DIR"
   printf '[{"targets": ["%s:%s"], "labels": {"job": "otel-collector"}}]\n' \
-    "$collector_addr" "$PORT_COLLECTOR_METRICS" > "$COLLECTOR_TARGETS"
+    "$collector_addr" "$CONTAINER_PORT_COLLECTOR_METRICS" > "$COLLECTOR_TARGETS"
 
   say "starting $PROMETHEUS"
   run_detached "$PROMETHEUS" \
-    --publish "$PORT_PROMETHEUS:$PORT_PROMETHEUS" \
+    --publish "$PORT_PROMETHEUS:$CONTAINER_PORT_PROMETHEUS" \
     --volume "$TELEMETRY_DIR/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
     --volume "$COLLECTOR_TARGETS:/etc/prometheus/collector-targets.json:ro" \
     "$IMAGE_PROMETHEUS" \
@@ -308,8 +327,8 @@ await_trace() {
   return 1
 }
 
-# The gRPC leg, over the published :4317 — the port telemetry/README.md tells Claude Code
-# to use, so this is the path that actually matters. telemetrygen runs on the stack's
+# The gRPC leg, over the published OTLP gRPC port — the one telemetry/README.md tells
+# Claude Code to use, so this is the path that actually matters. telemetrygen runs on the stack's
 # network and is aimed at the network gateway, which is this host, so the span travels
 # through the published host port rather than around it.
 verify_grpc() {
@@ -335,7 +354,7 @@ verify_grpc() {
   fi
 }
 
-# The HTTP leg, over the published :4318, sent from the host itself. OTLP/JSON needs
+# The HTTP leg, over the published OTLP HTTP port, sent from the host itself. OTLP/JSON needs
 # nothing but curl, which makes this the most faithful reproduction available of what a
 # process on this machine does when it exports.
 verify_http() {
