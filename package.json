@@ -13,7 +13,8 @@
     "trace": "bun run src/cli/main.ts trace",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "privacy": "bash scripts/privacy-scan.sh"
+    "privacy": "bash scripts/privacy-scan.sh",
+    "telemetry": "bash telemetry/stack.sh"
   },
   "devDependencies": {
     "@types/bun": "latest"

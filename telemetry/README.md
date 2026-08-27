@@ -5,23 +5,42 @@ Claude Code emits both natively; nothing in `src/` is involved. This exists so
 `miser-tracing-yhc.1` can answer whether Jaeger's UI covers what we need before anyone
 builds an exporter for the sessions already on disk.
 
-**This has never been run.** It was written on a machine without Docker, so treat it as
-a starting point that has been reasoned about, not a recipe that has been verified. Two
-things are most likely to break first: the Jaeger image tag (`all-in-one` is the v1
-line; Jaeger v2 ships as `jaegertracing/jaeger` with different configuration), and the
-collector's Jaeger exporter address if Jaeger's OTLP receiver isn't listening where this
-config expects. Fix them in place and delete this paragraph when the stack comes up.
+The stack runs on Apple's native `container` runtime. No Docker is involved, and the
+`docker` CLI still on this machine has no daemon behind it. On 2026-08-27 the three
+services came up and `verify` confirmed spans travelling from the published OTLP ports
+into Jaeger. What nobody has done yet is judge Jaeger's UI against a real Claude Code
+session — that is `miser-tracing-yhc.1`.
+
+You need Apple's `container` CLI (`brew install container`) with the runtime started
+(`container system start`).
 
 ## Run it
 
 ```bash
-cd telemetry && docker compose up -d
+bun run telemetry up       # start Jaeger, the collector and Prometheus
+bun run telemetry verify   # prove spans actually reach Jaeger
+bun run telemetry down     # stop all three and remove them
+bun run telemetry status   # what is running, and which ports answer
 ```
 
 Jaeger's UI is at <http://localhost:16686>, Prometheus at <http://localhost:9090>.
 Claude Code talks to the collector on `localhost:4317`, and the collector fans traces
 out to Jaeger and metrics out to Prometheus. One endpoint to configure, two backends
 behind it.
+
+Run `verify` after every `up`, before trusting anything you see. It sends real spans
+through both published OTLP ports and then asks Jaeger's query API whether those exact
+spans arrived, so it catches the case where the transport succeeds and the data
+vanishes anyway. That is not hypothetical: it is how the previous Docker stack failed
+on 2026-08-26 — every port open, every connection accepted, nothing ever stored.
+
+`telemetry/stack.sh` is the script behind all four commands, and it is worth reading
+once if you touch this stack. The part that surprises people: containers on this
+runtime do not resolve each other by name, so the collector's address for Jaeger and
+Prometheus's address for the collector are both read from the runtime at startup and
+injected. That is why `otel-collector-config.yaml` names an environment variable where
+you would expect a hostname, and why `prometheus.yml` discovers its target from a
+generated file instead of listing it.
 
 ## Point Claude Code at it
 
@@ -48,8 +67,11 @@ the trace store.
 
 ## Check it worked
 
-Run a prompt, then look for the `claude_code.session.count` metric in Prometheus and a
-trace under the `claude-code` service in Jaeger.
+`bun run telemetry verify` already answers this for the stack itself, so if it passed,
+the collector and Jaeger are fine and any remaining problem is on Claude Code's side.
+
+For a real session, run a prompt, then look for the `claude_code.session.count` metric
+in Prometheus and a trace under the `claude-code` service in Jaeger.
 
 If nothing arrives, find out whether Claude Code is emitting before you suspect the
 collector:

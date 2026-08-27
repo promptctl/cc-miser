@@ -19,3 +19,9 @@ out/
 # pid and a boot timestamp — facts about one running process on one laptop, with no
 # meaning in any other clone. It was tracked until miser-portability-adi.1.
 .claude/scheduled_tasks.lock
+
+# Addresses the container runtime assigned to a running stack, written by
+# telemetry/stack.sh so Prometheus can discover the collector. They describe three
+# containers alive on one laptop right now and mean nothing in any other clone —
+# the same reason .claude/scheduled_tasks.lock is not tracked.
+telemetry/.run/
