@@ -1,15 +1,20 @@
 # Local telemetry stack
 
 Sends a running Claude Code session's traces to Jaeger and its metrics to Prometheus.
-Claude Code emits both natively; nothing in `src/` is involved. This exists so
-`miser-tracing-yhc.1` can answer whether Jaeger's UI covers what we need before anyone
-builds an exporter for the sessions already on disk.
+Claude Code emits both natively; nothing in `src/` is involved.
 
 The stack runs on Apple's native `container` runtime. No Docker is involved, and the
 `docker` CLI still on this machine has no daemon behind it. On 2026-08-27 the three
-services came up and `verify` confirmed spans travelling from the published OTLP ports
-into Jaeger. What nobody has done yet is judge Jaeger's UI against a real Claude Code
-session — that is `miser-tracing-yhc.1`.
+services came up, `verify` confirmed spans travelling from the published OTLP ports into
+Jaeger, and a real Claude Code session — subagent included — was read back out of Jaeger
+and checked against its own transcript.
+
+That session settled what this stack was built to settle, and the answer is on
+`miser-tracing-yhc.1`: keep Jaeger for the span tree, because its waterfall, flamegraph
+and span detail work well on real traces; expect nothing from it numerically, because its
+only measures are span count and duration. It cannot sum a numeric tag even within a
+single trace, so every token and cost ledger stays in `src/`. The usage vector on
+`claude_code.llm_request` spans is exact — it matched the transcript to the token.
 
 You need Apple's `container` CLI (`brew install container`) with the runtime started
 (`container system start`).
@@ -23,10 +28,18 @@ bun run telemetry down     # stop all three and remove them
 bun run telemetry status   # what is running, and which ports answer
 ```
 
-Jaeger's UI is at <http://localhost:16686>, Prometheus at <http://localhost:9090>.
-Claude Code talks to the collector on `localhost:4317`, and the collector fans traces
+Jaeger's UI is at <http://localhost:17686>, Prometheus at <http://localhost:19090>.
+Claude Code talks to the collector on `localhost:14317`, and the collector fans traces
 out to Jaeger and metrics out to Prometheus. One endpoint to configure, two backends
 behind it.
+
+Those are not the ports you expect, and that is deliberate. OTLP's well-known 4317 and
+4318 are what *every* telemetry stack on a developer machine reaches for, so a stack
+pinned to them collides with the next project that wants to observe something — on this
+machine, with an unrelated collector held up by a restart policy. cc-miser publishes
+14317, 14318, 18889, 17686 and 19090 instead and yields the well-known numbers. Inside
+the containers the services still listen on the standard ports; only the host-side
+mapping moved. `telemetry/stack.sh` is the one place either set is written down.
 
 Run `verify` after every `up`, before trusting anything you see. It sends real spans
 through both published OTLP ports and then asks Jaeger's query API whether those exact
@@ -50,7 +63,7 @@ export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1   # traces are gated behind this
 export OTEL_TRACES_EXPORTER=otlp
 export OTEL_METRICS_EXPORTER=otlp
 export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:14317   # not 4317 — see above
 export OTEL_LOG_TOOL_DETAILS=1                 # see below — this one matters here
 claude
 ```
@@ -111,9 +124,15 @@ That is the delivery join — cost against shipped work — without building any
 Traces begin when you switch telemetry on. The sessions already in
 `~/.claude/projects` will never appear here, and reaching them is what
 `miser-tracing-yhc.2` exists for. Native spans also carry no context residency, no
-activity classification, and no attribution beneath the call, and `result_tokens` is
-documented as approximate where the transcript records exact usage. This stack shows
-you the shape of a session, not its economics.
+activity classification, and no attribution beneath the call. This stack shows you the
+shape of a session, not its economics.
+
+Two things the earlier notes here got wrong, corrected by enumerating every tag key in a
+real trace on 2026-08-27. `result_tokens` is not emitted at all, so its documented
+approximation is not a problem this project has. `parent_agent_id` is not emitted either
+— subagent lineage rides on span parentage plus an `agent_id` tag, and that `agent_id` is
+the same id as in the `subagents/agent-<id>.jsonl` filename `src/discover.ts` already
+parses. What the spans DO carry exactly is the usage vector.
 
 `reference/docs/CLAUDE_CODE_MONITORING.md` has the full span schema and the complete
 environment variable list.
