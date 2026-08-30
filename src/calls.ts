@@ -203,6 +203,10 @@ export interface Conversation {
   /** Tool results whose tool_use block we never saw. Counted, never dropped.
    * [LAW:no-silent-failure] */
   unmatchedToolResults: number;
+  /** Tool results answering an id that already had one. The join keeps a single result
+   * per tool_use, so these are results the analysis does not carry — the same kind of
+   * gap as `unmatchedToolResults`, in the other direction, and counted the same way. */
+  duplicateToolResults: number;
 }
 
 const SUMMARY_LEN = 90;
@@ -473,7 +477,20 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
   // yields every tool that was requested and lets the result be absent, which is the
   // shape the data actually has. Iteration order is therefore transcript order of the
   // requests, and stable regardless of when results come back.
-  const resultOf = new Map(toolResults.map((r) => [r.id, r] as const));
+  // Indexing by id keeps only ONE result per tool_use, so a second result for an id
+  // already answered would vanish here — a whole result gone from every downstream
+  // figure with nothing to say it happened. It is counted instead. Measured across the
+  // corpus on 2026-08-30: 67,047 tool_result blocks, zero such duplicates, so this
+  // counts a shape the transcripts do not currently produce — which is the same
+  // likelihood `unmatchedToolResults` carries, and the same reason to count it rather
+  // than assume it away. [LAW:no-silent-failure]
+  const resultOf = new Map<string, { id: string; chars: number; ts: number }>();
+  let duplicateToolResults = 0;
+  for (const r of toolResults) {
+    if (resultOf.has(r.id)) duplicateToolResults++;
+    resultOf.set(r.id, r);
+  }
+
   const tools: ToolExec[] = [...toolUses].map(([id, use]) => {
     const answer = resultOf.get(id);
     return {
@@ -496,5 +513,5 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
     turns[i]!.lastCall = next ? next.firstCall - 1 : Math.max(0, calls.length - 1);
   }
 
-  return { calls, arrivals, tools, turns, unmatchedToolResults };
+  return { calls, arrivals, tools, turns, unmatchedToolResults, duplicateToolResults };
 }

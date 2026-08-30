@@ -117,7 +117,8 @@ function notesFor(
     // are worth their own number: on a live transcript they are the tools still running,
     // and on a finished one they are interrupts. [LAW:one-source-of-truth]
     `${conv.tools.filter((t) => t.tsEnd !== null).length} of ${conv.tools.length} tool executions ` +
-      `paired with a result, ${conv.unmatchedToolResults} results unmatched`,
+      `paired with a result, ${conv.unmatchedToolResults} results unmatched, ` +
+      `${conv.duplicateToolResults} duplicate`,
     ...(stats.unparseableLines ? [`${stats.unparseableLines} unparseable JSONL lines`] : []),
     // A line type we have never seen means the transcript format moved under us. It is
     // named here rather than counted silently, because every downstream number is
