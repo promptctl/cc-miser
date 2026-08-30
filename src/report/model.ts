@@ -105,6 +105,23 @@ export interface Ledger {
   rows: readonly LedgerRow[];
 }
 
+/** A span this finding is about, and what a link to it should say.
+ *
+ * THE SEAM BETWEEN THE TWO TOOLS. cc-miser prices a call; Jaeger draws it. An anchor is
+ * what lets a priced finding open the exact span it is talking about, which is worth more
+ * than the flamegraph this report used to draw — that chart could show you a shape, and
+ * this hands you the thing itself in a viewer that already does waterfall, span detail
+ * and comparison.
+ *
+ * `nodeId` is a span-tree id built by `spans.ts` (`rootCallId`), never spelled here: the
+ * span id Jaeger indexes is a digest over that string, so an invented id yields a
+ * well-formed link into an empty trace. [LAW:one-source-of-truth] */
+export interface SpanAnchor {
+  nodeId: string;
+  /** What the link reads as, e.g. `call 12`. */
+  label: string;
+}
+
 /** A specific, priced thing to act on. PROJECT.md: "the report stops being a chart and
  * becomes a punch list." A finding without a price is an observation. */
 export interface Finding {
@@ -114,6 +131,14 @@ export interface Finding {
   /** Share of the session this finding accounts for, 0..1. */
   shareOfSession: number;
   severity: 'high' | 'medium' | 'note';
+  /** Which spans this finding names, for linking out to Jaeger. Empty when the finding
+   * is about the session as a whole rather than about particular calls.
+   *
+   * [LAW:dataflow-not-control-flow] A list that is usually one long, rather than an
+   * optional the renderer branches on: an unanchored finding renders zero links through
+   * the same code path an anchored one renders one, so there is no arm that can be got
+   * wrong. */
+  spans: readonly SpanAnchor[];
 }
 
 /** Everything resident in the context window at a given call — the arena view. One
@@ -146,15 +171,6 @@ export type StratumSource =
   | 'startup'
   /** No arrival explains this band. The honesty bucket, not a blend. */
   | 'unattributed';
-
-export interface FlameNode {
-  name: string;
-  value: number;
-  kind: string;
-  activity: Activity | null;
-  depth: number;
-  children: FlameNode[];
-}
 
 /** How much of the session's spend each classification tier accounted for. Required,
  * so a report cannot show percentages without showing their basis. */
@@ -228,7 +244,6 @@ export interface SessionReport {
   ledgers: readonly Ledger[];
   findings: readonly Finding[];
   strata: readonly Stratum[];
-  flame: FlameNode;
 
   /** What the session was doing, in one line, for a human scanning a list. */
   synopsis: string;

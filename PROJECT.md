@@ -160,16 +160,19 @@ to shipped artifacts: tokens per merged PR, decomposed by phase, trended over ti
 
 ## The views
 
-Three renderings of the span set, in ascending order of novelty:
+Three renderings of the span set, in ascending order of novelty. The first two are
+BORROWED, and that is deliberate: `miser otlp` sends the span set to Jaeger in two
+domains — *time*, and *token* where a span's width is its spend — so a viewer
+somebody else maintains does the tree, on cost.
 
-1. **The waterfall** — spans over wall time, nested, the classic trace UI. Free:
-   export Chrome Trace Event JSON and load it in ui.perfetto.dev, which brings
-   zoom, search, and a SQL engine. Exported twice — *time domain*, and *token
-   domain* where span width is cost, so Perfetto's whole toolset operates on spend.
-2. **The flamegraph** — the tree weighted by tokens (or dollars), zoomable,
-   rendered with d3-flame-graph in a self-contained HTML report beside the
-   aggregate ledgers: cost by tool, by attachment type, by activity, by project,
-   by model; cache economics; startup cost.
+1. **The waterfall** — spans over wall time, nested, the classic trace UI. Jaeger's.
+2. **The flamegraph** — the tree weighted by tokens, zoomable. Jaeger's too. The
+   report drew its own until `miser-tracing-yhc.3` deleted it; what stays in the
+   report is the half Jaeger structurally cannot compute, because its only measures
+   are span count and duration and it cannot sum a numeric tag even within one
+   trace: the aggregate ledgers (cost by tool, by attachment type, by activity, by
+   project, by model), cache economics, startup cost, and the findings. A finding
+   links out to the span of the call it names.
 3. **The stratigraphy** — the arena view, which we believe does not exist anywhere
    yet: call index on x, context-window offset on y, every content item a colored
    stratum (by cause or activity) running rightward through its residency.
@@ -269,6 +272,5 @@ records everywhere downstream. One span tree as the single source of truth, ever
 renderer a pure function of it. Exact numbers never adjusted by estimates;
 estimates always labeled, with the remainder explicit. Failures and unknowns
 surfaced, never swallowed. Classification verdicts cached, versioned, and carrying
-provenance. Lean on existing viewers (Perfetto, d3-flame-graph, OTLP backends)
-rather than building chart engines — the value is in the attribution, not the
-pixels.
+provenance. Lean on existing viewers (Jaeger, over OTLP) rather than building chart
+engines — the value is in the attribution, not the pixels.
