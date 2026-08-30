@@ -203,28 +203,38 @@ function buildConversationSpan(
 
   const callChildren = (c: Call): Span[] => {
     const out: Span[] = [];
-    for (const b of c.blocks) {
-      if (b.kind !== 'tool_use') continue;
-      const exec = conv.tools.find((e) => e.toolUseId === b.id);
+    // Driven by this call's tool EXECUTIONS rather than by its tool_use blocks. The two
+    // are the same set — `buildConversation` makes a `ToolExec` for every tool_use block
+    // it pushes onto `call.blocks` — so nothing is lost, and taking the exec directly
+    // removes a lookup that could miss along with the `??` fallbacks that stood in for a
+    // miss. Those fallbacks were not merely noise: `tStart` fell back to the CALL's
+    // timestamp, so a tool still in flight sat at a different place on the axis than the
+    // same tool once its result arrived. [LAW:types-are-the-program]
+    for (const exec of conv.tools.filter((e) => e.callIndex === c.index)) {
       const toolSpan: Span = {
-        id: `tool:${idPrefix}${b.id}`,
-        label: `${b.name} ${exec?.summary ?? ''}`.trim(),
+        id: `tool:${idPrefix}${exec.toolUseId}`,
+        label: `${exec.name} ${exec.summary}`.trim(),
         detail: {
           kind: 'tool',
-          name: b.name,
-          summary: exec?.summary ?? '',
-          resultChars: exec?.resultChars ?? 0,
+          name: exec.name,
+          summary: exec.summary,
+          // Characters of result RECEIVED, which is genuinely none while the tool is
+          // still running — not a stand-in for an unknown.
+          resultChars: exec.resultChars ?? 0,
         },
         lineage,
-        tStart: exec?.tsStart ?? c.ts,
-        tEnd: exec?.tsEnd ?? c.ts,
+        // Requested here, and — until its result lands — ending here too. A tool whose
+        // result never arrived is drawn as the zero-width instant we actually know
+        // about, rather than given a guessed extent.
+        tStart: exec.tsStart,
+        tEnd: exec.tsEnd ?? exec.tsStart,
         callFirst: c.index,
         callLast: c.index,
         children: [],
       };
       // Conversations this tool call spawned (the tool_use edge).
       for (const kid of kids.filter(
-        (k) => immediateAgent(k.lineage)!.via === 'tool_use' && k.meta.toolUseId === b.id,
+        (k) => immediateAgent(k.lineage)!.via === 'tool_use' && k.meta.toolUseId === exec.toolUseId,
       ))
         toolSpan.children.push(graft(kid, c.index));
       // A grafted conversation can outlast the tool result that started it; the

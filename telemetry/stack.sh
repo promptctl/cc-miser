@@ -79,6 +79,35 @@ readonly PORT_PROMETHEUS=19090
 # OTLP port would be a second place to send traces to. [LAW:single-enforcer]
 readonly CONTAINER_PORT_JAEGER_OTLP=4317
 
+# WHICH SPAN STORE JAEGER RUNS, and it is not the default. This is the whole of the fix
+# for miser-tracing-yhc.5, so the reasoning lives here rather than in a ticket nobody
+# reads from a shell script.
+#
+# WHAT WAS MEASURED, on 2026-08-30, by posting one span twice to a throwaway all-in-one
+# under each store and reading the trace back — because the docs do not state this at a
+# resolution that decides it:
+#
+#   memory   re-sending a span APPENDS. The trace then holds both versions, which is why
+#            re-exporting a session that grew produced two root spans and a doubled span
+#            count, and why the only cure was wiping the entire store.
+#   badger   re-sending a span REPLACES it. Same trace, one span, the newer content.
+#
+# THE PART THAT IS EASY TO GET WRONG, and the reason `test/otlp-rewrite.test.ts` exists:
+# badger keys a span on (traceId, startTime, spanId), NOT on (traceId, spanId). Re-sending
+# with a DIFFERENT start time appends exactly like `memory` did. So this store fixes
+# re-export only for as long as the exporter derives a given span's start time the same
+# way twice, and that is a property of `cli/otlp.ts`, not of this file. The test asserts
+# it; this comment is why it may not be deleted.
+#
+# EPHEMERAL, so `down` still destroys the store and `down && up` remains the full reset
+# the README points at for the one case re-export cannot fix — an id derivation that
+# changed, which orphans the previous trace rather than superseding it. Badger persists to
+# disk if pointed at a directory, and that was measured to work here (a bind-mounted store
+# survived the container being removed and recreated); it is not adopted because this
+# stack has no restart path to benefit from it — `up` refuses to run while the containers
+# exist, so every route back through here goes via `down`. [LAW:carrying-cost]
+readonly JAEGER_STORAGE=badger
+
 TELEMETRY_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly TELEMETRY_DIR
 readonly RUN_DIR="$TELEMETRY_DIR/.run"
@@ -212,6 +241,8 @@ cmd_up() {
   run_detached "$JAEGER" \
     --publish "$PORT_JAEGER_UI:$CONTAINER_PORT_JAEGER_UI" \
     --env COLLECTOR_OTLP_ENABLED=true \
+    --env "SPAN_STORAGE_TYPE=$JAEGER_STORAGE" \
+    --env BADGER_EPHEMERAL=true \
     "$IMAGE_JAEGER"
   local jaeger_addr
   jaeger_addr=$(wait_for_address "$JAEGER")

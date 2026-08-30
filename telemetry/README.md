@@ -151,33 +151,44 @@ Everything the report can group by is a tag: `model`, `tool_name`, `subagent_typ
 numeric tag across spans, every span also carries its whole subtree's cost already summed,
 as `cc_miser.rollup.*`.
 
-### Re-exporting, and the one case where it bites
+### Re-exporting a session that grew
 
-Trace and span ids are derived from the session rather than drawn at random. Re-exporting an
-**unchanged** session is therefore idempotent — measured on a clean store, a 125-span session
-exported twice is still 125 spans, not 250.
+Re-export it. The new export supersedes the old one, and the trace ends up holding the
+current version of the session and nothing else. A transcript still being written is the
+one you most want to look at, so this is ordinary usage rather than something to avoid.
 
-Two cases break that, both worth knowing because both are silent in the UI and loud in
-`verify:otlp`:
+Two things make that work, and they are worth knowing because a change to either one
+brings the old behaviour back.
 
-**The session grew.** A transcript still being written gains calls, so `call:12` may exist in
-the new export and not the old — but `call:3` exists in both, with the same derived id and
-*different* content. This store keeps both. The trace then holds the previous export's spans
-alongside the new ones: `verify:otlp` reports it as two root spans and a span count well over
-what the pipeline would export now. Exporting a live session is fine; exporting it *again*
-later needs a reset first.
+**Ids are derived, not drawn at random.** A span's id is a digest over the session, the
+domain and the span-tree node, so the same call exports to the same id every time — which
+is what lets the second export land on top of the first instead of beside it. It is also
+what lets the HTML report link to a span it never exported.
 
-**The id derivation changed.** Change what goes into the hash and the previous export becomes
-an orphan trace beside the new one, which shows up as `session.id` finding two traces.
+**Jaeger runs `badger` here, not the default memory store.** The memory store *appends* a
+re-sent span, so the trace accumulated both versions: two root spans, a doubled span count,
+and totals computed off a session that appeared twice. Badger replaces it. That is the
+whole reason `telemetry/stack.sh` sets `SPAN_STORAGE_TYPE`, and the comment there records
+the measurement.
 
-Jaeger's store here is in-memory, so the reset for either is `bun run telemetry down && bun
-run telemetry up`.
+The catch worth carrying: badger keys a span on `(traceId, startTime, spanId)`. A span
+re-sent with a *different* start time appends exactly like the memory store did. So the
+exporter has to derive a given span's start time the same way twice, and
+`test/otlp-rewrite.test.ts` is what holds it to that — it exports a fixture session, grows
+it, exports it again, and asserts every span present in both landed on the same key. Change
+how a layout positions spans and that test is what tells you.
 
-Resetting the whole store to refresh one session is a workaround, not an answer — a session
-still in progress is exactly the one you want to look at, so re-exporting it is ordinary
-usage. `miser-tracing-yhc.5` holds that work and the three routes out of it.
+What still needs a reset:
 
-`verify:otlp` is what turns that paragraph into a claim you can check: it asks Jaeger — not
+**The id derivation changed.** Change what goes into the hash and the previous export
+becomes an orphan trace beside the new one — a different trace id is a different trace, so
+nothing supersedes anything. It shows up as `session.id` finding two traces.
+
+The store is ephemeral, so the reset is `bun run telemetry down && bun run telemetry up`.
+That still wipes everything, which is why it is reserved for the case above rather than
+being the routine way to refresh a session.
+
+`verify:otlp` is what turns all of that into a claim you can check: it asks Jaeger — not
 the exporter — whether the trace is there, whether every span arrived, whether every
 subagent nests under the span that spawned it, whether the total equals the report's, and
 whether each dimension actually finds the trace when you filter on it.

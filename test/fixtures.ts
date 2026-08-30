@@ -159,7 +159,20 @@ export function buildTranscript(spec: TranscriptSpec): string {
   const out: string[] = [];
   let uuid = 0;
   const next = (): string => `u${String(++uuid).padStart(4, '0')}`;
-  const at = (i: number): string => new Date(Date.UTC(2026, 0, 1, 0, startMinute + i)).toISOString();
+  /** Minute `i` of the fixture clock, optionally `sec` seconds into it.
+   *
+   * The seconds exist for ONE reason: the lines of a request group do not share a
+   * timestamp in a real transcript. The writer records a line as each content block
+   * streams, seconds apart — measured at 0.7s between a call's first line and its
+   * tool_use on a corpus session. A fixture that stamps a whole group with one time is
+   * making a claim about the world that the corpus does not support, and it hides every
+   * bug that turns on the difference: a tool span anchored to its CALL rather than to its
+   * own tool_use record renders identically under one clock and moves under two.
+   *
+   * Groups stay inside their minute for any block count a fixture builds; sixty blocks
+   * would run into the minute the tool results occupy. */
+  const at = (i: number, sec = 0): string =>
+    new Date(Date.UTC(2026, 0, 1, 0, startMinute + i, sec)).toISOString();
 
   // The clock advances with the CALLS, not with the events: a user line sits in the
   // minute before the response it provokes. That keeps a conversation's call timestamps
@@ -216,7 +229,7 @@ export function buildTranscript(spec: TranscriptSpec): string {
         line({
           type: 'assistant',
           uuid: next(),
-          timestamp: at(i * 2 + 1),
+          timestamp: at(i * 2 + 1, k),
           sessionId,
           cwd,
           requestId,
