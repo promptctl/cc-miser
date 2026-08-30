@@ -38,6 +38,7 @@ import { analyzeSession, naming, type ReadText } from '../session.ts';
 import { applyScope, readArgs, USAGE, type Command, type Scope } from './args.ts';
 import { listRow, toTsv } from './list.ts';
 import { traceFile } from './trace.ts';
+import { exportSession, toExportTsv, type ExportRow } from './otlp.ts';
 import { analyzeAll, buildCorpus, calibrate, select } from '../report/generate.ts';
 import { renderCorpus } from '../report/render.ts';
 import type { Selection } from '../report/model.ts';
@@ -82,7 +83,24 @@ export interface Runtime {
   /** Epoch ms stamped into whatever the command produces. */
   now: number;
   read: ReadText;
+  /** Sending one OTLP request, as a capability rather than a `fetch` call in `run`.
+   *
+   * [LAW:effects-at-boundaries] This is what keeps `otlp` exercisable without a collector:
+   * the whole translation is a pure function and the one thing that reaches the network is
+   * a parameter a test can supply. It is also the seam that made the driver async — a
+   * command that talks to a socket cannot honestly pretend otherwise. */
+  post: Post;
 }
+
+/** What a collector answered. Status and body together, because a message like
+ * `partial success: 3 spans rejected` arrives in the body of a 200 and the status alone
+ * would report that as a clean export. */
+export interface PostResult {
+  status: number;
+  body: string;
+}
+
+export type Post = (url: string, json: string) => Promise<PostResult>;
 
 /** Discover, then narrow — the spine every command shares.
  *
@@ -104,8 +122,12 @@ function scoped(
 }
 
 /** Run one command. Returns the exit code rather than calling `process.exit`, so the
- * whole driver is testable and the single exit lives in `main` below. */
-export function run(command: Command, rt: Runtime): number {
+ * whole driver is testable and the single exit lives in `main` below.
+ *
+ * Async because `otlp` posts to a collector. The three commands that touch no socket
+ * still resolve immediately; what the signature now states is that this function may
+ * perform network I/O, which it may. */
+export async function run(command: Command, rt: Runtime): Promise<number> {
   const { streams, now, read } = rt;
 
   // Answered before anything is discovered: `help` is a question about the tool, and a
@@ -144,6 +166,40 @@ export function run(command: Command, rt: Runtime): number {
       streams.out(`${JSON.stringify(traceFile(analyzed, root, criteria, now), null, 2)}\n`);
       const notes = analyzed.reduce((a, s) => a + s.notes.length, 0);
       streams.err(`${analyzed.length} session trees written · ${notes} notes carried\n`);
+      return EXIT.OK;
+    }
+
+    case 'otlp': {
+      const analyzed = picked.map((s) => naming(s, () => analyzeSession(s, read)));
+      // Built through `traceFile` rather than from the analysed sessions directly, so the
+      // exporter is a function of the SAME document `miser trace` publishes. A second
+      // route from analysis to spans would be a second span model, free to drift from the
+      // one every other renderer in this project is a view of. [LAW:one-source-of-truth]
+      const file = traceFile(analyzed, root, criteria, now);
+
+      const rows: ExportRow[] = [];
+      for (const session of file.sessions) {
+        const { request, rows: made } = exportSession(session);
+        const { status, body } = await rt.post(command.endpoint, JSON.stringify(request));
+        // [LAW:no-silent-failure] Checked after every call, before anything downstream
+        // treats the export as done. A collector that refuses a session and a collector
+        // that stored it both leave this loop having "sent" it; only the status tells
+        // them apart, and a run that printed trace ids for spans Jaeger never received
+        // would send its reader to an empty page with no reason to doubt the tool.
+        if (status < 200 || status >= 300)
+          throw new Error(
+            `${command.endpoint} rejected session ${session.session}: HTTP ${status} ${body}`,
+          );
+        rows.push(...made);
+        streams.err('.');
+      }
+      streams.err('\n');
+
+      streams.out(`${toExportTsv(rows)}\n`);
+      const spans = rows.reduce((a, r) => a + r.spans, 0);
+      streams.err(
+        `${file.sessions.length} sessions · ${rows.length} traces · ${spans} spans -> ${command.endpoint}\n`,
+      );
       return EXIT.OK;
     }
 
@@ -224,7 +280,7 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
  * `process.argv`, `process.env` and `Date.now()` itself, so the exit-code contract this
  * file declares can be exercised by a test instead of asserted in a comment. The three
  * ambient reads live on the `import.meta.main` line below — the actual edge. */
-export function main(argv: readonly string[], rt: Runtime): number {
+export async function main(argv: readonly string[], rt: Runtime): Promise<number> {
   // Parsed in its own try, so a bad command line exits USAGE and a failure during the
   // run exits FAILED. Collapsing them would tell a script that a corrupt transcript was
   // a typo. [LAW:no-silent-failure]
@@ -237,12 +293,27 @@ export function main(argv: readonly string[], rt: Runtime): number {
   }
 
   try {
-    return run(command, rt);
+    return await run(command, rt);
   } catch (e) {
     rt.streams.err(`${message(e)}\n`);
     return EXIT.FAILED;
   }
 }
+
+/** The real post. [LAW:effects-at-boundaries] The only place in this project that opens a
+ * socket, and it lives on the edge beside the file reader and the clock.
+ *
+ * A network error throws out of `fetch` and is caught by `main`'s handler as EXIT.FAILED
+ * with the message attached — a collector that is not running should say so, not be
+ * turned into a status code this function invented. [LAW:no-silent-failure] */
+const postJson: Post = async (url, json) => {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: json,
+  });
+  return { status: res.status, body: await res.text() };
+};
 
 // `import.meta.main` is false when a test imports `run` above, so importing this module
 // never runs a corpus scan as a side effect — the exact trap `src/report/args.ts` was
@@ -254,12 +325,18 @@ export function main(argv: readonly string[], rt: Runtime): number {
 // file was whole. Setting the code and letting the process end when the event loop
 // drains flushes the stream first. The truncation is invisible to the writer and only
 // appears under the pipe this tool's output contract is designed around.
+// Assigned inside `.then` rather than awaited at the top level, for the same reason the
+// paragraph above gives: the process must be allowed to end on a drained event loop, and
+// a top-level await here is equivalent — but the `.then` makes the ordering visible.
 if (import.meta.main)
-  process.exitCode = main(process.argv.slice(2), {
+  void main(process.argv.slice(2), {
     env: process.env,
     streams: { out: (t) => process.stdout.write(t), err: (t) => process.stderr.write(t) },
     now: Date.now(),
     read: readText,
+    post: postJson,
+  }).then((code) => {
+    process.exitCode = code;
   });
 
 export { USAGE };

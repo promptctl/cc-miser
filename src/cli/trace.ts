@@ -11,7 +11,7 @@
 // viewer format here would put a second span model in the project, one that a viewer
 // upgrade could pull out of step with the pipeline's.
 
-import { depthOf, lineagePath } from '../lineage.ts';
+import { depthOf, immediateAgent, lineagePath } from '../lineage.ts';
 import type { AnalyzedSession } from '../session.ts';
 import { rollup, type Span, type SpanDetail } from '../spans.ts';
 import { spend, type Usage } from '../tokens.ts';
@@ -23,7 +23,8 @@ import { spend, type Usage } from '../tokens.ts';
  * to drift from the one the pipeline actually holds. [LAW:one-source-of-truth] The two
  * additions are `depth` and `lineagePath`, which are functions of `lineage` computed
  * here so a consumer does not have to reimplement them to group by the dimension the
- * whole analysis pivots on. */
+ * whole analysis pivots on. `agentId` and `parentAgentId` join the set for the same
+ * reason and one more: they are what a live native trace joins to. */
 export interface TraceNode {
   id: string;
   label: string;
@@ -33,6 +34,19 @@ export interface TraceNode {
   depth: number;
   /** e.g. "main", or "code-review > Angle A line-by-line scan". */
   lineage: string;
+  /** The agent whose conversation this span is directly in; null at the root.
+   *
+   * THE JOIN KEY, which is why it is a field rather than something a consumer recovers by
+   * splitting `id` on `subagent:`. It is the same id Claude Code's native spans carry as
+   * `agent_id` and the same id `discover.ts` parses out of an `agent-<id>.jsonl`
+   * filename, so a live trace and this corpus meet on it with nothing invented. Stored in
+   * its own rendering it would be one fact living inside another — the exact drift
+   * `activity.ts` describes having removed when it stopped sniffing `because` for a tier.
+   * [FRAMING:representation] */
+  agentId: string | null;
+  /** The agent that spawned `agentId`; null at the root and one hop below it. Native
+   * documents this key and, as of 2026-08-29, does not emit it. */
+  parentAgentId: string | null;
   tStart: number;
   tEnd: number;
   callFirst: number;
@@ -56,6 +70,8 @@ export function traceNode(span: Span): TraceNode {
     detail: span.detail,
     depth: depthOf(span.lineage),
     lineage: lineagePath(span.lineage),
+    agentId: immediateAgent(span.lineage)?.agentId ?? null,
+    parentAgentId: span.lineage[span.lineage.length - 2]?.agentId ?? null,
     tStart: span.tStart,
     tEnd: span.tEnd,
     callFirst: span.callFirst,

@@ -119,13 +119,57 @@ Also free, and worth knowing about because PROJECT.md files it as speculative: t
 metrics stream carries `claude_code.pull_request.count` and `claude_code.commit.count`.
 That is the delivery join — cost against shipped work — without building anything.
 
+## Backfill: the sessions already on disk
+
+Native traces begin when you switch telemetry on, so nothing in `~/.claude/projects`
+reaches Jaeger on its own. `miser otlp` sends it:
+
+```bash
+bun run miser otlp --session 8c55cbcd     # or --project, --since, --limit
+bun run verify:otlp 8c55cbcd              # prove it arrived, nested and filterable
+```
+
+It posts to `localhost:14318` — this stack's OTLP/HTTP port — unless `--endpoint` says
+otherwise, and writes one row per (session, domain) with the Jaeger trace id.
+
+Each session becomes **two** traces, under two service names, because span width means two
+different things and one axis cannot carry both:
+
+- `cc-miser-time` — width is wall clock.
+- `cc-miser-tokens` — width is spend, one millisecond per input-equivalent token, so
+  Jaeger's zoom and search operate on cost. The axis is still labelled in time units;
+  that is cosmetic.
+
+Span names match the native schema wherever native has the concept — `claude_code.interaction`,
+`claude_code.llm_request`, `claude_code.tool` — so one Jaeger query reaches live and
+backfilled sessions alike. What native has no concept of takes a `cc_miser.` prefix
+(`cc_miser.session`, `cc_miser.subagent`) rather than pretending to be a native span.
+
+Everything the report can group by is a tag: `model`, `tool_name`, `subagent_type`,
+`agent_id`, `parent_agent_id`, `cc_miser.activity` and the tier that decided it,
+`cc_miser.depth`, `cc_miser.lineage`, `cc_miser.project`. Because Jaeger cannot sum a
+numeric tag across spans, every span also carries its whole subtree's cost already summed,
+as `cc_miser.rollup.*`.
+
+Trace ids are derived from the session rather than drawn at random, so exporting the same
+session twice overwrites it instead of leaving a second copy. That only holds while the
+derivation itself is unchanged: change what goes into the id and the previous export
+becomes an orphan trace beside the new one, which `verify:otlp` catches as `session.id`
+finding two traces. Jaeger's store here is in-memory, so `telemetry down && telemetry up`
+is the reset.
+
+`verify:otlp` is what turns that paragraph into a claim you can check: it asks Jaeger — not
+the exporter — whether the trace is there, whether every span arrived, whether subagents
+nest under the tool calls that spawned them, whether the total equals the report's, and
+whether each dimension actually finds the trace when you filter on it. Point it at a
+session of a few hundred spans; Jaeger's search returns whole traces and its in-memory
+store truncates the large ones under repeated queries.
+
 ## What this does not do
 
-Traces begin when you switch telemetry on. The sessions already in
-`~/.claude/projects` will never appear here, and reaching them is what
-`miser-tracing-yhc.2` exists for. Native spans also carry no context residency, no
-activity classification, and no attribution beneath the call. This stack shows you the
-shape of a session, not its economics.
+Native spans carry no context residency, no activity classification and no attribution
+beneath the call, and Jaeger cannot aggregate across traces at all. This stack shows you
+the shape of a session; its economics stay in `src/`.
 
 Two things the earlier notes here got wrong, corrected by enumerating every tag key in a
 real trace on 2026-08-27. `result_tokens` is not emitted at all, so its documented

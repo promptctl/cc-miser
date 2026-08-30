@@ -21,6 +21,7 @@ import {
   DEFAULT_RENDER_LIMIT,
   USAGE,
   applyScope,
+  commandsAccepting,
   readArgs,
   type Scope,
 } from '../src/cli/args.ts';
@@ -112,7 +113,9 @@ describe('a command line is parsed into the one command it names', () => {
 
   test('an unrecognised command names the ones that exist', () => {
     expect(() => readArgs(['reprot'])).toThrow(/unrecognised command/);
-    expect(() => readArgs(['reprot'])).toThrow(/list, trace, report/);
+    // Read from the command table rather than spelled out, so adding a command updates
+    // what this asserts instead of breaking it. [LAW:one-source-of-truth]
+    expect(() => readArgs(['reprot'])).toThrow(new RegExp(COMMAND_NAMES.join(', ')));
   });
 
   test('an unrecognised flag stops the run', () => {
@@ -409,13 +412,22 @@ function corpus(): { root: string; rt: () => { rt: Runtime; out: () => string; e
       let out = '';
       let err = '';
       const streams: Streams = { out: (t) => (out += t), err: (t) => (err += t) };
+      // Every OTLP request the run made, captured instead of sent. The exporter is a pure
+      // function and the socket is a parameter, so `otlp` is exercisable here with no
+      // collector running and no mock library. [LAW:effects-at-boundaries]
+      const posts: { url: string; json: string }[] = [];
       return {
         rt: {
           env: {},
           streams,
           now: 1_700_000_000_000,
           read: (p: string) => readFileSync(p, 'utf8'),
+          post: async (url: string, json: string) => {
+            posts.push({ url, json });
+            return { status: 200, body: '{}' };
+          },
         },
+        posts: () => posts,
         out: () => out,
         err: () => err,
       };
@@ -428,9 +440,9 @@ type Runtime = Parameters<typeof run>[1];
 describe('a command run end to end keeps its two streams apart', () => {
   const { root, rt } = corpus();
 
-  test('list writes rows to stdout and its summary to stderr', () => {
+  test('list writes rows to stdout and its summary to stderr', async () => {
     const t = rt();
-    expect(run(readArgs(['list', '--projects', root]), t.rt)).toBe(EXIT.OK);
+    expect(await run(readArgs(['list', '--projects', root]), t.rt)).toBe(EXIT.OK);
     const lines = t.out().trimEnd().split('\n');
     expect(lines[0]).toBe(COLUMNS.join('\t'));
     expect(lines).toHaveLength(3); // header plus two sessions
@@ -440,71 +452,71 @@ describe('a command run end to end keeps its two streams apart', () => {
     expect(t.err()).toContain('2 sessions');
   });
 
-  test('a scope reaches the walk, not just the predicate', () => {
+  test('a scope reaches the walk, not just the predicate', async () => {
     const t = rt();
-    expect(run(readArgs(['list', '--projects', root, '--project', 'beta']), t.rt)).toBe(EXIT.OK);
+    expect(await run(readArgs(['list', '--projects', root, '--project', 'beta']), t.rt)).toBe(EXIT.OK);
     expect(t.out().trimEnd().split('\n')).toHaveLength(2);
     expect(t.out()).toContain('beta');
     expect(t.out()).not.toContain('alpha');
   });
 
-  test('a scope that matches nothing exits EMPTY rather than looking like success', () => {
+  test('a scope that matches nothing exits EMPTY rather than looking like success', async () => {
     // The failure this prevents: a script processing zero sessions believing it
     // processed a corpus.
     const t = rt();
-    expect(run(readArgs(['list', '--projects', root, '--project', 'nonesuch']), t.rt)).toBe(
+    expect(await run(readArgs(['list', '--projects', root, '--project', 'nonesuch']), t.rt)).toBe(
       EXIT.EMPTY,
     );
     expect(t.out()).toBe('');
     expect(t.err()).toContain('no sessions matched');
   });
 
-  test('trace writes one parseable document, whatever else was printed', () => {
+  test('trace writes one parseable document, whatever else was printed', async () => {
     const t = rt();
-    expect(run(readArgs(['trace', '--projects', root]), t.rt)).toBe(EXIT.OK);
+    expect(await run(readArgs(['trace', '--projects', root]), t.rt)).toBe(EXIT.OK);
     const doc = JSON.parse(t.out());
     expect(doc.schema).toBe(SCHEMA);
     expect(doc.sessions).toHaveLength(2);
     expect(doc.projectsRoot).toBe(root);
   });
 
-  test('report writes its files and names them on stdout', () => {
+  test('report writes its files and names them on stdout', async () => {
     const t = rt();
     const out = join(root, 'report-out');
-    expect(run(readArgs(['report', '--projects', root, '--out', out]), t.rt)).toBe(EXIT.OK);
+    expect(await run(readArgs(['report', '--projects', root, '--out', out]), t.rt)).toBe(EXIT.OK);
     const written = t.out().trimEnd().split('\n');
     expect(written).toEqual([join(out, 'index.html'), join(out, 'corpus.json')]);
     expect(readFileSync(written[0]!, 'utf8')).toContain('<!doctype html>');
     expect(JSON.parse(readFileSync(written[1]!, 'utf8')).generatedAt).toBe(1_700_000_000_000);
   });
 
-  test('the page states the scope it was given, not just its own heuristic', () => {
+  test('the page states the scope it was given, not just its own heuristic', async () => {
     // [LAW:one-source-of-truth] One list of criteria, holding both narrowings.
     const t = rt();
     const out = join(root, 'report-scoped');
-    run(readArgs(['report', '--projects', root, '--project', 'alpha', '--out', out]), t.rt);
+    await run(readArgs(['report', '--projects', root, '--project', 'alpha', '--out', out]), t.rt);
     const corpusJson = JSON.parse(readFileSync(join(out, 'corpus.json'), 'utf8'));
     expect(corpusJson.selection.criteria.join(' ')).toContain('project matches /alpha/');
     expect(corpusJson.selection.criteria.join(' ')).toContain('transcript length between');
   });
 
-  test('a scoped report counts its scope separately from the machine', () => {
+  test('a scoped report counts its scope separately from the machine', async () => {
     // The masthead asks "how much of what I asked for did you show me", and it can only
     // answer that if the scoped count is its own number rather than folded into either
     // neighbour.
     const t = rt();
     const out = join(root, 'report-inscope');
-    run(readArgs(['report', '--projects', root, '--project', 'alpha', '--out', out]), t.rt);
+    await run(readArgs(['report', '--projects', root, '--project', 'alpha', '--out', out]), t.rt);
     const { selection } = JSON.parse(readFileSync(join(out, 'corpus.json'), 'utf8'));
     expect(selection.discovered).toBe(2);
     expect(selection.inScope).toBe(1);
     expect(selection.rendered).toBe(1);
   });
 
-  test('an unscoped report has nothing to distinguish, and says so', () => {
+  test('an unscoped report has nothing to distinguish, and says so', async () => {
     const t = rt();
     const out = join(root, 'report-unscoped');
-    run(readArgs(['report', '--projects', root, '--out', out]), t.rt);
+    await run(readArgs(['report', '--projects', root, '--out', out]), t.rt);
     const { selection } = JSON.parse(readFileSync(join(out, 'corpus.json'), 'utf8'));
     expect(selection.inScope).toBe(selection.discovered);
   });
@@ -516,29 +528,29 @@ describe('the exit codes are the contract they are documented to be', () => {
   // catch arms used to pass every test.
   const { root, rt } = corpus();
 
-  test('a bad flag is USAGE, and nothing is read or written', () => {
+  test('a bad flag is USAGE, and nothing is read or written', async () => {
     const t = rt();
-    expect(main(['list', '--bogus', 'x'], t.rt)).toBe(EXIT.USAGE);
+    expect(await main(['list', '--bogus', 'x'], t.rt)).toBe(EXIT.USAGE);
     expect(t.out()).toBe('');
     expect(t.err()).toContain('unrecognised argument');
     // A usage error must not have walked the corpus on its way to failing.
     expect(t.err()).not.toContain('scanning');
   });
 
-  test('a misspelled flag in command position is reported as a command', () => {
+  test('a misspelled flag in command position is reported as a command', async () => {
     // `miser --hlep` names no command, and the first token IS the command slot — so the
     // message says so rather than guessing that a flag was intended.
     const t = rt();
-    expect(main(['--hlep'], t.rt)).toBe(EXIT.USAGE);
+    expect(await main(['--hlep'], t.rt)).toBe(EXIT.USAGE);
     expect(t.err()).toContain('unrecognised command `--hlep`');
   });
 
-  test('an unrecognised command is USAGE, not FAILED', () => {
+  test('an unrecognised command is USAGE, not FAILED', async () => {
     const t = rt();
-    expect(main(['stratigraphy'], t.rt)).toBe(EXIT.USAGE);
+    expect(await main(['stratigraphy'], t.rt)).toBe(EXIT.USAGE);
   });
 
-  test('a failure reading real input is FAILED, not USAGE', () => {
+  test('a failure reading real input is FAILED, not USAGE', async () => {
     // The command line was valid; the pipeline broke. A script that retries on USAGE and
     // stops on FAILED can only be written if these stay different numbers.
     const t = rt();
@@ -548,18 +560,18 @@ describe('the exit codes are the contract they are documented to be', () => {
         throw new Error('transcript is not readable');
       },
     };
-    expect(main(['list', '--projects', root], exploding)).toBe(EXIT.FAILED);
+    expect(await main(['list', '--projects', root], exploding)).toBe(EXIT.FAILED);
     expect(t.err()).toContain('transcript is not readable');
   });
 
-  test('a scope that matches nothing is EMPTY, distinct from both', () => {
+  test('a scope that matches nothing is EMPTY, distinct from both', async () => {
     const t = rt();
-    expect(main(['list', '--projects', root, '--session', 'nomatch'], t.rt)).toBe(EXIT.EMPTY);
+    expect(await main(['list', '--projects', root, '--session', 'nomatch'], t.rt)).toBe(EXIT.EMPTY);
   });
 
-  test('help is OK and goes to stdout, because asking is not a mistake', () => {
+  test('help is OK and goes to stdout, because asking is not a mistake', async () => {
     const t = rt();
-    expect(main(['--help'], t.rt)).toBe(EXIT.OK);
+    expect(await main(['--help'], t.rt)).toBe(EXIT.OK);
     expect(t.out()).toContain('usage: miser');
   });
 });
@@ -605,7 +617,7 @@ describe('a failure names the transcript that caused it', () => {
   // `trace` called `analyzeSession` bare, so a throw from deep inside reached stderr with
   // nothing saying which of hundreds of scanned files it came from.
   for (const command of ['list', 'trace', 'report'] as const) {
-    test(`${command} says which file broke`, () => {
+    test(`${command} says which file broke`, async () => {
       const t = rt();
       const exploding: Runtime = {
         ...t.rt,
@@ -614,7 +626,7 @@ describe('a failure names the transcript that caused it', () => {
         },
       };
       const argv = [command, '--projects', root, ...(command === 'report' ? ['--out', join(root, `o-${command}`)] : [])];
-      expect(main(argv, exploding)).toBe(EXIT.FAILED);
+      expect(await main(argv, exploding)).toBe(EXIT.FAILED);
       expect(t.err()).toContain('malformed transcript');
       // The contract is that the message NAMES the transcript — not which stage did the
       // naming. `report` fails first in calibration, which has its own wrap and its own
@@ -630,7 +642,11 @@ describe('a flag given an empty value is a usage error, not a filesystem error',
   // under EXIT.FAILED instead of the usage error every other bad value gets.
   for (const flag of FLAG_NAMES) {
     test(`${flag} rejects an empty value`, () => {
-      const command = flag === '--out' ? 'report' : 'list';
+      // Which command to ask comes from the table that decides it, not from a map kept
+      // here by hand: a hand-written one sends a command-specific flag to a command that
+      // refuses it, and the test then passes on the wrong error — or fails for a reason
+      // that has nothing to do with empty values. [LAW:one-source-of-truth]
+      const command = commandsAccepting(flag)[0]!;
       expect(() => readArgs([command, flag, ''])).toThrow(/needs a value/);
     });
   }
