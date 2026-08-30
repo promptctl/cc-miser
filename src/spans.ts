@@ -12,7 +12,13 @@ import { withReason, type Label } from './activity.ts';
 export type SpanDetail =
   | { kind: 'session'; sessionId: string }
   | { kind: 'turn'; snippet: string }
-  | { kind: 'call'; usage: Usage; model: string; lineCount: number; label: Label }
+  /** `ts` is WHEN THE CALL HAPPENED, which is a different fact from where its span
+   * starts. It lives here, beside the usage and the model it is priced with, because
+   * `tStart` is an EXTENT: a parent's extent has to cover its children, so a call whose
+   * subagent began before it must start earlier than the call did. Read as the billable
+   * instant, that widened extent would silently move the call to a different day's rate
+   * card. Two facts, two fields. [LAW:one-source-of-truth] */
+  | { kind: 'call'; ts: number; usage: Usage; model: string; lineCount: number; label: Label }
   | { kind: 'tool'; name: string; summary: string; resultChars: number }
   | { kind: 'subagent'; agentType: string; description: string };
 
@@ -90,7 +96,9 @@ export const isCallSpan = (s: Span): s is CallSpan => s.detail.kind === 'call';
  * only from below it. [LAW:one-way-deps] */
 export const billableOf = (s: CallSpan): { model: string; ts: number; usage: Usage } => ({
   model: s.detail.model,
-  ts: s.tStart,
+  // The call's own instant, NOT `tStart`. See the note on `SpanDetail`'s call variant:
+  // `tStart` is an extent that a child can widen, and pricing must not move when it does.
+  ts: s.detail.ts,
   usage: s.detail.usage,
 });
 
@@ -223,6 +231,7 @@ function buildConversationSpan(
         lineage.length === 0 ? `call ${c.index}` : `${immediateAgent(lineage)!.agentType} call ${c.index}`,
       detail: {
         kind: 'call',
+        ts: c.ts,
         usage: c.usage,
         model: c.model,
         lineCount: c.lineCount,
@@ -241,8 +250,21 @@ function buildConversationSpan(
   // call to the NEXT call's start (the earlier version) both charged human idle time
   // to the call and produced spans that escaped their parents, which Chrome Trace
   // rejects as malformed nesting.
+  //
+  // BOTH ENDS, which is what this rule used to say and only half do. `tEnd` flowed up
+  // and `tStart` did not, so a child that BEGAN before its parent still escaped — and it
+  // does begin earlier, on 24 of the sessions on this machine: a slash-command fork is
+  // attributed to the call nearest it in time, and a subagent transcript's first line can
+  // precede that call. The half-rule was invisible while the only consumer was a
+  // flamegraph that lays children out by value; it surfaced the moment spans were emitted
+  // to a viewer that reads the timestamps (miser-tracing-yhc.2).
+  //
+  // Widening `tStart` is safe here ONLY because the call's billable instant moved to
+  // `detail.ts` — see `SpanDetail`. Done before that, this would have repriced 24
+  // sessions' calls at whatever rate card the subagent's start date fell under.
   for (const c of conv.calls) {
     const span = callSpans.get(c.index)!;
+    span.tStart = Math.min(c.ts, ...span.children.map((k) => k.tStart));
     span.tEnd = Math.max(c.ts + 1, ...span.children.map((k) => k.tEnd));
   }
 

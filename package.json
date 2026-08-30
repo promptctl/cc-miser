@@ -11,6 +11,8 @@
     "report": "bun run src/cli/main.ts report",
     "list": "bun run src/cli/main.ts list",
     "trace": "bun run src/cli/main.ts trace",
+    "otlp": "bun run src/cli/main.ts otlp",
+    "verify:otlp": "bun run scripts/verify-otlp.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "privacy": "bash scripts/privacy-scan.sh",

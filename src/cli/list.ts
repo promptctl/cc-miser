@@ -8,6 +8,7 @@ import { priceCalls } from '../models.ts';
 import type { AnalyzedSession } from '../session.ts';
 import { allCalls, billableOf, isSpawned, rollup, rollupWhere } from '../spans.ts';
 import { spend } from '../tokens.ts';
+import { tsv } from './tsv.ts';
 
 /** A session reduced to the figures that fit on one line.
  *
@@ -94,16 +95,7 @@ const _everyFieldIsAColumn: MissingColumn extends never ? true : MissingColumn =
  * a flag nobody has a plan to delete. `trace` is where the structured shape lives, and
  * it is a command rather than a mode for the same reason.
  *
- * A project name containing a tab would corrupt a row, so tabs are replaced with a
- * space rather than escaped: this is a display name derived from a real directory, and
- * a quoting scheme would oblige every consumer to implement the unquoting.
- *
- * Newlines and carriage returns go the same way, and for a worse reason than tabs. A
- * POSIX directory name may legally contain a newline, and `project` is the last segment
- * of a real one — so an un-stripped `\n` does not merely misplace a field, it ends the
- * row early and starts a second one with the wrong number of columns, turning one
- * session into two malformed records that every consumer reads as data. */
-const cell = (v: string | number): string => String(v).replace(/[\t\r\n]/g, ' ');
-
-export const toTsv = (rows: readonly ListRow[]): string =>
-  [COLUMNS.join('\t'), ...rows.map((r) => COLUMNS.map((c) => cell(r[c])).join('\t'))].join('\n');
+ * `list`'s binding of the shared renderer: the column table above, which carries the
+ * compile-time proof that it covers every field of `ListRow`, applied to the escaping
+ * and joining rules that `tsv.ts` owns for every command that emits rows. */
+export const toTsv = (rows: readonly ListRow[]): string => tsv(COLUMNS, rows);

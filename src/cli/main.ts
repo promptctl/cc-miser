@@ -38,6 +38,7 @@ import { analyzeSession, naming, type ReadText } from '../session.ts';
 import { applyScope, readArgs, USAGE, type Command, type Scope } from './args.ts';
 import { listRow, toTsv } from './list.ts';
 import { traceFile } from './trace.ts';
+import { exportHeader, exportRow, exportSession } from './otlp.ts';
 import { analyzeAll, buildCorpus, calibrate, select } from '../report/generate.ts';
 import { renderCorpus } from '../report/render.ts';
 import type { Selection } from '../report/model.ts';
@@ -52,7 +53,12 @@ import type { Selection } from '../report/model.ts';
  * apart processes an empty set believing it processed a corpus. */
 export const EXIT = {
   OK: 0,
-  /** The pipeline failed on real input. The message on stderr names the transcript. */
+  /** The pipeline failed on real input. The message on stderr names WHAT FAILED, which is
+   * the transcript when the failure is about a session's contents, and the endpoint and
+   * session when a collector refused an export the pipeline built correctly. Those are two
+   * failure classes under one code, and the second is not a weaker case of the first:
+   * naming a transcript there would point the reader at a file that is fine and send them
+   * to debug it. `otlp`'s exports are the path that has both. */
   FAILED: 1,
   /** The command line was wrong. Nothing was read, nothing was written. */
   USAGE: 2,
@@ -82,14 +88,159 @@ export interface Runtime {
   /** Epoch ms stamped into whatever the command produces. */
   now: number;
   read: ReadText;
+  /** Sending one OTLP request, as a capability rather than a `fetch` call in `run`.
+   *
+   * [LAW:effects-at-boundaries] This is what keeps `otlp` exercisable without a collector:
+   * the whole translation is a pure function and the one thing that reaches the network is
+   * a parameter a test can supply. It is also the seam that made the driver async — a
+   * command that talks to a socket cannot honestly pretend otherwise. */
+  post: Post;
 }
+
+/** What a collector answered. Status and body together, because a message like
+ * `partial success: 3 spans rejected` arrives in the body of a 200 and the status alone
+ * would report that as a clean export. */
+export interface PostResult {
+  status: number;
+  body: string;
+}
+
+export type Post = (url: string, json: string) => Promise<PostResult>;
+
+/** What a collector said while answering 200 — all three of the things it can say.
+ *
+ * [LAW:types-are-the-program] THREE states, because the collector has three. It stored
+ * everything; it stored everything and wants to tell you something; it refused some spans.
+ * OTLP's `ExportTracePartialSuccess` documents `error_message` for both of the last two —
+ * "to explain why the server rejected parts of the data during a partial success OR to
+ * convey warnings/suggestions during a full success" — so a 200 with `rejected_spans: 0`
+ * and a message is an ordinary case and not a contradiction.
+ *
+ * Returned as `string | null` there were only two slots, and the warning had to be miscast
+ * into one of them: as `null` it vanished, which is the answer-shaped void this function
+ * exists to prevent, and as a non-null string it would have failed a run whose export
+ * succeeded. Neither is a check that was forgotten — both are what a two-state type does to
+ * a three-state fact. Widening the type is what deletes the question. */
+export type CollectorSaid =
+  | { kind: 'stored' }
+  | { kind: 'warned'; message: string }
+  | { kind: 'rejected'; message: string };
+
+/** [LAW:no-silent-failure] Read rather than merely available. `PostResult.body` exists to
+ * carry this and, until this function, nothing looked at it — so a partially-rejected
+ * export printed a trace id and exited OK, and the person who followed that id to Jaeger
+ * found a trace quietly missing spans with nothing pointing back here.
+ *
+ * A body that is not JSON, or carries no partial-success object, means nothing was
+ * rejected. That is not a fallback: a collector reporting a rejection has a documented way
+ * to say so, and its absence is the collector saying nothing was dropped. */
+export function collectorSaid(body: string): CollectorSaid {
+  const parsed: unknown = ((): unknown => {
+    try {
+      return JSON.parse(body);
+    } catch {
+      return null;
+    }
+  })();
+  if (typeof parsed !== 'object' || parsed === null) return { kind: 'stored' };
+  const partial: unknown = field(parsed as Record<string, unknown>, 'partialSuccess');
+  if (typeof partial !== 'object' || partial === null) return { kind: 'stored' };
+  const rejectedSpans = field(partial as Record<string, unknown>, 'rejectedSpans');
+  const errorMessage = field(partial as Record<string, unknown>, 'errorMessage');
+  const rejected = spanCount(rejectedSpans);
+  const note = typeof errorMessage === 'string' && errorMessage !== '' ? errorMessage : '';
+  // A count that will not parse is NOT a count of zero. Reading it as "nothing dropped"
+  // would exit OK on the one answer that says spans went missing and that we cannot
+  // interpret, so it fails the run with the raw value quoted. We cannot prove the export
+  // is whole, and an export that cannot be certified is not a success.
+  // [LAW:no-silent-failure]
+  if (rejected === null)
+    return {
+      kind: 'rejected',
+      message: `unreadable rejected-span count ${JSON.stringify(rejectedSpans)}${
+        note === '' ? '' : `: ${note}`
+      }`,
+    };
+  if (rejected.isZero)
+    // Nothing dropped. The message, if there is one, is the collector's full-success
+    // warning — the run continues and the reader still gets to see it.
+    return note === '' ? { kind: 'stored' } : { kind: 'warned', message: note };
+  return {
+    kind: 'rejected',
+    message: `${rejected.text} spans rejected${note === '' ? '' : `: ${note}`}`,
+  };
+}
+
+/** The rejected-span count if the collector sent one, `null` if it sent something that is
+ * not a count. Absent is 0 — protojson omits a zero int64, so silence there means nothing
+ * was dropped.
+ *
+ * [LAW:parse-dont-validate] A SHAPE test, not `Number()`. Coercion answers for values that
+ * are not counts at all, and answers WRONG in both directions: `Number("")`, `Number(false)`
+ * and `Number([])` are 0, so a body carrying `"rejectedSpans": ""` beside
+ * `"errorMessage": "dropped 4000 spans"` read as nothing-dropped and exited OK — the exact
+ * failure `collectorSaid` exists to prevent, reached through the arm added to prevent it.
+ * The other direction is as bad: `Number(true)` is 1 and `Number([5])` is 5, so non-counts
+ * were reported AS counts. int64 crosses OTLP/JSON as either a JSON number or a string of
+ * digits; everything else is the collector saying something this cannot read.
+ *
+ * `null` is NOT one of those, and is 0 on purpose: proto3's JSON mapping defines JSON null
+ * for a scalar as the field's default. An absent field means the same thing, because
+ * protojson omits a zero int64 rather than writing it.
+ *
+ * ZERO-NESS AND TEXT, never a number, because nothing here needs arithmetic — only "did it
+ * say any were dropped" and "what exactly did it say". Parsing to a `number` quietly
+ * rounded a digit string past 2^53, so a collector reporting 9007199254740993 was printed
+ * back 9007199254740992: a wrong figure handed to the operator by the one function whose
+ * job is never to hand them a plausible wrong figure. For the STRING spelling, echoing the
+ * collector's own digits makes that unrepresentable.
+ *
+ * The NUMBER spelling cannot be rescued the same way and is refused instead of reported.
+ * `JSON.parse` rounds before this ever sees the value, so by the time `9007199254740993`
+ * arrives it is already `…992` and the original digits are gone — echoing is not on offer.
+ * `Number.isSafeInteger` is therefore the test, not `Number.isInteger`: anything past 2^53
+ * is a value this cannot state faithfully, and `1e21` would otherwise pass the shape test
+ * and print as `1e+21 spans rejected`, a "count" of nothing. Unreadable is the honest
+ * answer for both — the caller is told the collector said something unrepresentable rather
+ * than handed a number that is merely close. */
+interface RejectedCount {
+  isZero: boolean;
+  /** The collector's own digits, echoed rather than reformatted. */
+  text: string;
+}
+const spanCount = (v: unknown): RejectedCount | null => {
+  if (v === undefined || v === null) return { isZero: true, text: '0' };
+  if (typeof v === 'number')
+    return Number.isSafeInteger(v) && v >= 0 ? { isZero: v === 0, text: String(v) } : null;
+  if (typeof v === 'string')
+    return /^\d+$/.test(v) ? { isZero: /^0+$/.test(v), text: v } : null;
+  return null;
+};
+
+/** One protojson field under either of its two legal spellings.
+ *
+ * [LAW:one-source-of-truth] proto3's JSON mapping says a parser MUST accept both the
+ * lowerCamelCase name and the original `snake_case` one; only emitters get to pick, and a
+ * marshaler configured with `OrigName` picks the second. Read under one spelling, a
+ * genuine rejection from such a collector parses as `stored`, the run prints trace ids and
+ * exits OK, and the reader follows one to a trace missing spans — the exact failure this
+ * whole function exists to prevent, reintroduced by a naming convention. Jaeger and the
+ * OTel collector both emit camelCase today, which is what makes this cheap to get wrong
+ * and cheap to get right. */
+const field = (o: Record<string, unknown>, camel: string): unknown =>
+  o[camel] ?? o[camel.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)];
 
 /** Discover, then narrow — the spine every command shares.
  *
- * [LAW:dataflow-not-control-flow] One scoping rule for all three commands. `list`,
- * `trace` and `report` differ in what they EMIT, never in which sessions they are
- * about, so the scope cannot mean one thing on one command and something else on
- * another. */
+ * [LAW:dataflow-not-control-flow] One scoping rule for every command that takes a scope.
+ * They differ in what they EMIT, never in which sessions they are about, so the scope
+ * cannot mean one thing on one command and something else on another.
+ *
+ * Deliberately not a list of names. `test/cli.test.ts` reads the command table for the
+ * same reason, having already been caught out: its hand-written array said three while
+ * the comment above it claimed every command, and `otlp` made that false the day it
+ * landed. A sentence that has to be recounted on every new command is a copy that will
+ * drift. [LAW:one-source-of-truth] */
 function scoped(
   scope: Scope,
   { env, streams }: Runtime,
@@ -104,8 +255,12 @@ function scoped(
 }
 
 /** Run one command. Returns the exit code rather than calling `process.exit`, so the
- * whole driver is testable and the single exit lives in `main` below. */
-export function run(command: Command, rt: Runtime): number {
+ * whole driver is testable and the single exit lives in `main` below.
+ *
+ * Async because `otlp` posts to a collector. The three commands that touch no socket
+ * still resolve immediately; what the signature now states is that this function may
+ * perform network I/O, which it may. */
+export async function run(command: Command, rt: Runtime): Promise<number> {
   const { streams, now, read } = rt;
 
   // Answered before anything is discovered: `help` is a question about the tool, and a
@@ -144,6 +299,80 @@ export function run(command: Command, rt: Runtime): number {
       streams.out(`${JSON.stringify(traceFile(analyzed, root, criteria, now), null, 2)}\n`);
       const notes = analyzed.reduce((a, s) => a + s.notes.length, 0);
       streams.err(`${analyzed.length} session trees written · ${notes} notes carried\n`);
+      return EXIT.OK;
+    }
+
+    case 'otlp': {
+      const analyzed = picked.map((s) => naming(s, () => analyzeSession(s, read)));
+      // Built through `traceFile` rather than from the analysed sessions directly, so the
+      // exporter is a function of the SAME document `miser trace` publishes. A second
+      // route from analysis to spans would be a second span model, free to drift from the
+      // one every other renderer in this project is a view of. [LAW:one-source-of-truth]
+      const file = traceFile(analyzed, root, criteria, now);
+
+      // The header goes out before the first POST, so stdout is a RUNNING RECORD of what
+      // reached the collector rather than a report issued only if the whole scope
+      // succeeded. Batched until the end, a failure on session N discarded the trace ids
+      // of sessions 1..N-1 that had already landed — the run said "this failed" and left
+      // no record of the traces that are sitting in Jaeger right now. Those are different
+      // facts and the batching collapsed them. [LAW:no-silent-failure]
+      streams.out(`${exportHeader()}\n`);
+
+      let traces = 0;
+      let spans = 0;
+      for (const session of file.sessions) {
+        const { request, rows } = exportSession(session);
+        // The session is named HERE because this is the layer that knows it. `postJson`
+        // names the endpoint and the phase, which is everything it has; the two checks
+        // below name the session. A network failure was the one export failure naming
+        // neither, so on a 700-session run the operator had to infer which session died
+        // from the last row on stdout. [LAW:no-silent-failure] [LAW:decomposition]
+        // `try`, not `.catch`: a `Post` that throws synchronously — a fake, or an impl
+        // that validates its arguments before returning a promise — never reaches a
+        // rejection handler, and would escape with the session unnamed.
+        let answer: PostResult;
+        try {
+          answer = await rt.post(command.endpoint, JSON.stringify(request));
+        } catch (e) {
+          throw new Error(`exporting session ${session.session}: ${message(e)}`);
+        }
+        const { status, body } = answer;
+
+        // [LAW:no-silent-failure] Checked after every call, before anything downstream
+        // treats the export as done. A collector that refuses a session and a collector
+        // that stored it both leave this loop having "sent" it, and a run that printed
+        // trace ids for spans Jaeger never received would send its reader to an empty page
+        // with no reason to doubt the tool.
+        if (status < 200 || status >= 300)
+          throw new Error(
+            `${command.endpoint} rejected session ${session.session}: HTTP ${status} ${body}`,
+          );
+        // A 200 is not the same as "all of it arrived". `collectorSaid` reads what the
+        // status cannot say; treated as success, a partially-stored session would print a
+        // trace id for a trace quietly missing spans. A warning is NOT that case — the
+        // export landed whole — so it goes to stderr beside the progress dots and the run
+        // carries on. [LAW:no-silent-failure] the collector spoke; something says so.
+        const said = collectorSaid(body);
+        if (said.kind === 'rejected')
+          throw new Error(
+            `${command.endpoint} accepted session ${session.session} only in part: ${said.message}`,
+          );
+        if (said.kind === 'warned')
+          streams.err(
+            `\n${command.endpoint} stored session ${session.session} with a warning: ${said.message}\n`,
+          );
+
+        // Written as it lands, header already out, so the rows on stdout are exactly the
+        // sessions the collector took — including on the run that later throws.
+        for (const r of rows) streams.out(`${exportRow(r)}\n`);
+        traces += rows.length;
+        spans += rows.reduce((a, r) => a + r.spans, 0);
+        streams.err('.');
+      }
+      streams.err('\n');
+      streams.err(
+        `${file.sessions.length} sessions · ${traces} traces · ${spans} spans -> ${command.endpoint}\n`,
+      );
       return EXIT.OK;
     }
 
@@ -224,7 +453,7 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
  * `process.argv`, `process.env` and `Date.now()` itself, so the exit-code contract this
  * file declares can be exercised by a test instead of asserted in a comment. The three
  * ambient reads live on the `import.meta.main` line below — the actual edge. */
-export function main(argv: readonly string[], rt: Runtime): number {
+export async function main(argv: readonly string[], rt: Runtime): Promise<number> {
   // Parsed in its own try, so a bad command line exits USAGE and a failure during the
   // run exits FAILED. Collapsing them would tell a script that a corrupt transcript was
   // a typo. [LAW:no-silent-failure]
@@ -237,12 +466,99 @@ export function main(argv: readonly string[], rt: Runtime): number {
   }
 
   try {
-    return run(command, rt);
+    return await run(command, rt);
   } catch (e) {
     rt.streams.err(`${message(e)}\n`);
     return EXIT.FAILED;
   }
 }
+
+/** How long one session's export may take before the run gives up on the collector.
+ *
+ * Generous, because the bound exists to catch a collector that has STOPPED rather than one
+ * that is merely slow: a session posts as a single body, the corpus has sessions past a
+ * megabyte, and an endpoint across a slow link is doing nothing wrong. Thirty seconds is
+ * far past any healthy local collector and far short of forever, which is the only other
+ * value on offer. */
+const POST_TIMEOUT_MS = 30_000;
+
+/** The real post. [LAW:effects-at-boundaries] The only place in this project that opens a
+ * socket, and it lives on the edge beside the file reader and the clock.
+ *
+ * A network error throws out of `fetch` and is caught by `main`'s handler as EXIT.FAILED
+ * with the message attached — a collector that is not running should say so, not be
+ * turned into a status code this function invented. [LAW:no-silent-failure]
+ *
+ * THE BOUND, because "not running" is not the only way a collector fails. One that accepts
+ * the connection and then never answers leaves a bare `fetch` awaiting forever: no exit
+ * code, no stderr, no partial answer — the loudest failure design in this file defeated by
+ * a socket that simply goes quiet. That is not hypothetical for this backend; the retry
+ * budget in `scripts/verify-otlp.ts` exists because its memory store stalls part-way
+ * through bodies under load, measured on the read path. The write path gets a bound for
+ * the same reason.
+ *
+ * EVERY failure is re-thrown NAMED, which is a rule rather than a list of cases. Measured
+ * under Bun 1.2.23, the three ways one POST fails carry three unrelated messages and not
+ * one names the endpoint:
+ *
+ *   nothing listening   Error         "Unable to connect. Is the computer able to access the url?"
+ *   closed mid-body     Error         "The socket connection was closed unexpectedly. …pass `verbose: true`…"
+ *   silent mid-body     TimeoutError  "The operation timed out."
+ *
+ * Read on a run that exports many sessions, any of those is unactionable: it names neither
+ * which endpoint gave up nor which session was in flight, and the middle one advises a
+ * `fetch` option the reader cannot reach. An earlier version renamed only the
+ * `TimeoutError`, which left the OTHER TWO bare — and the closed-mid-body case is the one
+ * `scripts/verify-otlp.ts` actually documents this backend doing ("closes connections
+ * part-way through the body", reproduced there as ECONNRESET). Enumerating error classes
+ * is how that gap opened, so this does not enumerate: the endpoint and the phase are
+ * attached unconditionally and the original message rides along as detail.
+ * [LAW:dataflow-not-control-flow] [LAW:no-silent-failure]
+ *
+ * The PHASE is tracked because "nothing came back" and "it answered, then died" send the
+ * reader to different places: the second means a collector that took the request and may
+ * already hold the spans, so telling that reader the endpoint was unreachable would aim
+ * them at `--endpoint` and a restart when neither is the problem.
+ * [LAW:no-ambient-temporal-coupling] the phase is state this function owns, not something
+ * inferred from which line threw.
+ *
+ * "no response" and NOT "could not be reached", which is a claim this cannot support.
+ * `fetch` reports no connect event, so a collector that accepts the socket, takes the whole
+ * request and then never sends headers is indistinguishable here from one that was never
+ * listening — an earlier wording called both "could not be reached" and so told the first
+ * reader something false, in the very sentence added to stop the messages lying about the
+ * phase. What is actually known before headers arrive is only that nothing came back, so
+ * that is all this says; Bun's own text ("Unable to connect…") supplies the rest when it
+ * genuinely was a refusal. [LAW:types-are-the-program] don't represent a distinction you
+ * cannot observe. */
+export const makePostJson =
+  (timeoutMs: number = POST_TIMEOUT_MS): Post =>
+  async (url, json) => {
+    // BOTH awaits inside, because the deadline covers both phases and so must the naming.
+    // `AbortSignal.timeout` aborts the response body stream as well as the connection, so
+    // a collector that sends 200 headers and then goes quiet rejects at `.text()`, which a
+    // `try` around the `fetch` alone would not have caught.
+    let answered = false;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: json,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      answered = true;
+      return { status: res.status, body: await res.text() };
+    } catch (e) {
+      const phase = answered ? 'answered, then failed before its body arrived' : 'gave no response';
+      const bound =
+        e instanceof DOMException && e.name === 'TimeoutError' ? ` after ${timeoutMs / 1000}s` : '';
+      throw new Error(`${url} ${phase}${bound}: ${message(e)}`);
+    }
+  };
+
+/** The timeout injectable ONLY so a test can drive the edge without waiting 30s for it.
+ * `Runtime.post` is the seam the commands use; this is the real wiring behind it. */
+const postJson: Post = makePostJson();
 
 // `import.meta.main` is false when a test imports `run` above, so importing this module
 // never runs a corpus scan as a side effect — the exact trap `src/report/args.ts` was
@@ -254,12 +570,18 @@ export function main(argv: readonly string[], rt: Runtime): number {
 // file was whole. Setting the code and letting the process end when the event loop
 // drains flushes the stream first. The truncation is invisible to the writer and only
 // appears under the pipe this tool's output contract is designed around.
+// Assigned inside `.then` rather than awaited at the top level, for the same reason the
+// paragraph above gives: the process must be allowed to end on a drained event loop, and
+// a top-level await here is equivalent — but the `.then` makes the ordering visible.
 if (import.meta.main)
-  process.exitCode = main(process.argv.slice(2), {
+  void main(process.argv.slice(2), {
     env: process.env,
     streams: { out: (t) => process.stdout.write(t), err: (t) => process.stderr.write(t) },
     now: Date.now(),
     read: readText,
+    post: postJson,
+  }).then((code) => {
+    process.exitCode = code;
   });
 
 export { USAGE };

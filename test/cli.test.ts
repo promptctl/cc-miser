@@ -20,12 +20,15 @@ import {
   DEFAULT_OUT,
   DEFAULT_RENDER_LIMIT,
   USAGE,
+  DEFAULT_ENDPOINT,
   applyScope,
+  commandsAccepting,
   readArgs,
   type Scope,
 } from '../src/cli/args.ts';
 import { COLUMNS, listRow, toTsv, type ListRow } from '../src/cli/list.ts';
-import { EXIT, main, run, type Streams } from '../src/cli/main.ts';
+import { EXPORT_COLUMNS } from '../src/cli/otlp.ts';
+import { EXIT, main, makePostJson, run, type Streams } from '../src/cli/main.ts';
 import { SCHEMA, traceFile, traceNode } from '../src/cli/trace.ts';
 import type { SessionSource } from '../src/discover.ts';
 import { analyzeSession } from '../src/session.ts';
@@ -112,7 +115,9 @@ describe('a command line is parsed into the one command it names', () => {
 
   test('an unrecognised command names the ones that exist', () => {
     expect(() => readArgs(['reprot'])).toThrow(/unrecognised command/);
-    expect(() => readArgs(['reprot'])).toThrow(/list, trace, report/);
+    // Read from the command table rather than spelled out, so adding a command updates
+    // what this asserts instead of breaking it. [LAW:one-source-of-truth]
+    expect(() => readArgs(['reprot'])).toThrow(new RegExp(COMMAND_NAMES.join(', ')));
   });
 
   test('an unrecognised flag stops the run', () => {
@@ -390,7 +395,16 @@ function materialize(root: string, f: SessionFixture): void {
 }
 
 /** A corpus of two projects, on disk, and a runtime that captures both streams. */
-function corpus(): { root: string; rt: () => { rt: Runtime; out: () => string; err: () => string } } {
+function corpus(): {
+  root: string;
+  rt: () => {
+    rt: Runtime;
+    out: () => string;
+    err: () => string;
+    /** Every OTLP request the run made, captured instead of sent. */
+    posts: () => readonly { url: string; json: string }[];
+  };
+} {
   const root = mkdtempSync(join(tmpdir(), 'cc-miser-cli-'));
   materialize(root, buildSession(SPEC));
   materialize(
@@ -409,13 +423,22 @@ function corpus(): { root: string; rt: () => { rt: Runtime; out: () => string; e
       let out = '';
       let err = '';
       const streams: Streams = { out: (t) => (out += t), err: (t) => (err += t) };
+      // Every OTLP request the run made, captured instead of sent. The exporter is a pure
+      // function and the socket is a parameter, so `otlp` is exercisable here with no
+      // collector running and no mock library. [LAW:effects-at-boundaries]
+      const posts: { url: string; json: string }[] = [];
       return {
         rt: {
           env: {},
           streams,
           now: 1_700_000_000_000,
           read: (p: string) => readFileSync(p, 'utf8'),
+          post: async (url: string, json: string) => {
+            posts.push({ url, json });
+            return { status: 200, body: '{}' };
+          },
         },
+        posts: () => posts,
         out: () => out,
         err: () => err,
       };
@@ -428,9 +451,9 @@ type Runtime = Parameters<typeof run>[1];
 describe('a command run end to end keeps its two streams apart', () => {
   const { root, rt } = corpus();
 
-  test('list writes rows to stdout and its summary to stderr', () => {
+  test('list writes rows to stdout and its summary to stderr', async () => {
     const t = rt();
-    expect(run(readArgs(['list', '--projects', root]), t.rt)).toBe(EXIT.OK);
+    expect(await run(readArgs(['list', '--projects', root]), t.rt)).toBe(EXIT.OK);
     const lines = t.out().trimEnd().split('\n');
     expect(lines[0]).toBe(COLUMNS.join('\t'));
     expect(lines).toHaveLength(3); // header plus two sessions
@@ -440,71 +463,315 @@ describe('a command run end to end keeps its two streams apart', () => {
     expect(t.err()).toContain('2 sessions');
   });
 
-  test('a scope reaches the walk, not just the predicate', () => {
+  test('a scope reaches the walk, not just the predicate', async () => {
     const t = rt();
-    expect(run(readArgs(['list', '--projects', root, '--project', 'beta']), t.rt)).toBe(EXIT.OK);
+    expect(await run(readArgs(['list', '--projects', root, '--project', 'beta']), t.rt)).toBe(EXIT.OK);
     expect(t.out().trimEnd().split('\n')).toHaveLength(2);
     expect(t.out()).toContain('beta');
     expect(t.out()).not.toContain('alpha');
   });
 
-  test('a scope that matches nothing exits EMPTY rather than looking like success', () => {
+  test('a scope that matches nothing exits EMPTY rather than looking like success', async () => {
     // The failure this prevents: a script processing zero sessions believing it
     // processed a corpus.
     const t = rt();
-    expect(run(readArgs(['list', '--projects', root, '--project', 'nonesuch']), t.rt)).toBe(
+    expect(await run(readArgs(['list', '--projects', root, '--project', 'nonesuch']), t.rt)).toBe(
       EXIT.EMPTY,
     );
     expect(t.out()).toBe('');
     expect(t.err()).toContain('no sessions matched');
   });
 
-  test('trace writes one parseable document, whatever else was printed', () => {
+  test('trace writes one parseable document, whatever else was printed', async () => {
     const t = rt();
-    expect(run(readArgs(['trace', '--projects', root]), t.rt)).toBe(EXIT.OK);
+    expect(await run(readArgs(['trace', '--projects', root]), t.rt)).toBe(EXIT.OK);
     const doc = JSON.parse(t.out());
     expect(doc.schema).toBe(SCHEMA);
     expect(doc.sessions).toHaveLength(2);
     expect(doc.projectsRoot).toBe(root);
   });
 
-  test('report writes its files and names them on stdout', () => {
+  test('otlp posts every in-scope session and names its traces on stdout', async () => {
+    const t = rt();
+    expect(await run(readArgs(['otlp', '--projects', root]), t.rt)).toBe(EXIT.OK);
+
+    // Two fixture sessions, two domains each. Read off the posted BODIES rather than off
+    // the exporter, so this covers the wiring — that the driver posts what it printed.
+    expect(t.posts()).toHaveLength(2);
+    for (const p of t.posts()) {
+      expect(p.url).toBe(DEFAULT_ENDPOINT);
+      expect(JSON.parse(p.json).resourceSpans).toHaveLength(2);
+    }
+
+    const lines = t.out().trimEnd().split('\n');
+    expect(lines[0]).toBe(EXPORT_COLUMNS.join('\t'));
+    expect(lines).toHaveLength(5);
+    for (const line of lines.slice(1))
+      expect(line.split('\t')).toHaveLength(EXPORT_COLUMNS.length);
+    expect(t.err()).toContain(`-> ${DEFAULT_ENDPOINT}`);
+  });
+
+  test('otlp posts where --endpoint says, not where the default says', async () => {
+    const t = rt();
+    const elsewhere = 'http://example.invalid:4318/v1/traces';
+    expect(await run(readArgs(['otlp', '--projects', root, '--endpoint', elsewhere]), t.rt)).toBe(
+      EXIT.OK,
+    );
+    expect(t.posts().map((p) => p.url)).toEqual([elsewhere, elsewhere]);
+  });
+
+  test('a collector that refuses a session fails the run and names it', async () => {
+    const t = rt();
+    const refusing = { ...t.rt, post: async () => ({ status: 503, body: 'collector down' }) };
+    // Scoped to ONE session and asserted against that literal id. Run over both fixtures
+    // and matched with a hex pattern, this passed only because the two sessions happen to
+    // sort the way they do: `applyScope` orders most-recently-modified first, and of the
+    // two ids only `bbbb2222` is hex — `cli11111` contains `l` and `i`. The assertion was
+    // therefore standing on the mtimes of two writes rather than on any behaviour, and a
+    // tie would have failed it while the naming worked perfectly.
+    expect(await main(['otlp', '--projects', root, '--session', 'bbbb2222'], refusing)).toBe(
+      EXIT.FAILED,
+    );
+    expect(t.err()).toContain('503');
+    // The session is named — "the export failed" without which one is a report nobody can
+    // act on.
+    expect(t.err()).toContain('rejected session bbbb2222-2222-3333-4444-555555555555');
+  });
+
+  test('a collector that stores only part of a session is a failure, not a success', async () => {
+    // OTLP/HTTP answers 200 and reports what it dropped in the body. Read only the status,
+    // this prints a trace id and exits OK for a trace quietly missing spans — and the
+    // person who follows that id finds a short trace with nothing pointing back here.
+    const t = rt();
+    const partial = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({ partialSuccess: { rejectedSpans: '3', errorMessage: 'too big' } }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], partial)).toBe(EXIT.FAILED);
+    expect(t.err()).toContain('3 spans rejected');
+    expect(t.err()).toContain('too big');
+  });
+
+  test('a collector that stored everything and warned is heard, and still succeeds', async () => {
+    // OTLP documents `error_message` for warnings on a FULL success, not only for
+    // explaining a rejection, so `rejectedSpans: 0` with a message is an ordinary answer.
+    // Read through a two-state return it had nowhere to go: dropped as "nothing rejected",
+    // or promoted to a failure on an export that completely succeeded. Both are wrong, and
+    // this pins the third answer — the run survives AND the reader hears it.
+    const t = rt();
+    const warning = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({
+          partialSuccess: { rejectedSpans: '0', errorMessage: 'queue is nearly full' },
+        }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], warning)).toBe(EXIT.OK);
+    expect(t.err()).toContain('queue is nearly full');
+    // Named, so a warning on a multi-session run points at the session it is about.
+    expect(t.err()).toMatch(/stored session [0-9a-z-]+ with a warning/);
+  });
+
+  test('a rejection spelled in snake_case is still a rejection', async () => {
+    // proto3's JSON mapping requires a PARSER to accept both spellings; only emitters
+    // choose, and a marshaler built with OrigName emits the snake_case one. Read under
+    // camelCase alone, this body parses as "nothing rejected" and the run exits OK having
+    // printed a trace id for a trace missing 7 spans — the failure the function exists to
+    // prevent, reintroduced through a naming convention.
+    const t = rt();
+    const snake = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({
+          partial_success: { rejected_spans: '7', error_message: 'attribute too long' },
+        }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], snake)).toBe(EXIT.FAILED);
+    expect(t.err()).toContain('7 spans rejected');
+    expect(t.err()).toContain('attribute too long');
+  });
+
+  test('a rejected-span count that will not parse fails the run', async () => {
+    // NOT a count of zero. Folded into "nothing dropped" this exits OK on the one answer
+    // that says spans went missing AND cannot be interpreted; an export that cannot be
+    // certified whole is not a success.
+    const t = rt();
+    const garbled = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({
+          partialSuccess: { rejectedSpans: 'lots', errorMessage: 'dropped 4000 spans' },
+        }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], garbled)).toBe(EXIT.FAILED);
+    expect(t.err()).toContain('unreadable rejected-span count');
+    expect(t.err()).toContain('dropped 4000 spans');
+  });
+
+  test('values that are not counts are not read as zero, and not read as counts either', async () => {
+    // `Number()` answers for all of these and answers wrongly in BOTH directions:
+    // `Number("")`, `Number(false)`, `Number([])` are 0 — so a body saying spans were
+    // dropped exited OK — while `Number(true)` is 1 and `Number([5])` is 5, reporting
+    // non-counts AS counts. The shape is what decides, not the coercion.
+    for (const rejectedSpans of ['', ' ', '3.7', 'lots', true, false, [], [5], -1, 2.5]) {
+      const t = rt();
+      const odd = {
+        ...t.rt,
+        post: async () => ({
+          status: 200,
+          body: JSON.stringify({ partialSuccess: { rejectedSpans, errorMessage: 'dropped 4000 spans' } }),
+        }),
+      };
+      expect(await main(['otlp', '--projects', root], odd)).toBe(EXIT.FAILED);
+      expect(t.err()).toContain('unreadable rejected-span count');
+    }
+  });
+
+  test('a count the collector really did send is still read, in both wire forms', async () => {
+    // The other direction, so the shape test above cannot pass by rejecting everything:
+    // int64 crosses OTLP/JSON as a digit string, and a plain JSON number is also legal.
+    for (const rejectedSpans of ['7', 7]) {
+      const t = rt();
+      const real = {
+        ...t.rt,
+        post: async () => ({
+          status: 200,
+          body: JSON.stringify({ partialSuccess: { rejectedSpans, errorMessage: 'too big' } }),
+        }),
+      };
+      expect(await main(['otlp', '--projects', root], real)).toBe(EXIT.FAILED);
+      expect(t.err()).toContain('7 spans rejected');
+    }
+  });
+
+  test('a null count is the field default, not an unreadable one', async () => {
+    // proto3's JSON mapping defines JSON null on a scalar as the field's default, so this
+    // says zero rejected — same as omitting the field, which is what protojson does with a
+    // zero int64. Asserted as BEHAVIOUR, not as which line handles it: `field`'s `??`
+    // collapses an explicit null to undefined before `spanCount` is reached, so the null
+    // arm inside `spanCount` is not what this exercises. What it pins is the contract —
+    // a null count is the default and the run survives — which is the part that must not
+    // change however the two functions divide the work. [LAW:behavior-not-structure]
+    const t = rt();
+    const nulled = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({ partialSuccess: { rejectedSpans: null, errorMessage: 'queue is nearly full' } }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], nulled)).toBe(EXIT.OK);
+    expect(t.err()).toContain('queue is nearly full');
+  });
+
+  test('a count past 2^53 is echoed, not rounded', async () => {
+    // `Number("9007199254740993")` is 9007199254740992. Reporting that back would hand the
+    // operator a wrong figure from the one function whose job is never to do that.
+    const t = rt();
+    const huge = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({ partialSuccess: { rejectedSpans: '9007199254740993' } }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], huge)).toBe(EXIT.FAILED);
+    expect(t.err()).toContain('9007199254740993 spans rejected');
+  });
+
+  test('a JSON number too large to state exactly is refused, not approximated', async () => {
+    // The other int64 spelling cannot be echoed: `JSON.parse` rounds 9007199254740993 to
+    // …992 before anything here sees it, so the digits are already gone. Reporting the
+    // rounded value would be the wrong-figure failure by another route, and `1e21` would
+    // otherwise pass a plain isInteger check and print "1e+21 spans rejected".
+    for (const body of [
+      '{"partialSuccess":{"rejectedSpans":9007199254740993}}',
+      '{"partialSuccess":{"rejectedSpans":1e21}}',
+    ]) {
+      const t = rt();
+      const big = { ...t.rt, post: async () => ({ status: 200, body }) };
+      expect(await main(['otlp', '--projects', root], big)).toBe(EXIT.FAILED);
+      expect(t.err()).toContain('unreadable rejected-span count');
+    }
+  });
+
+  test('an ordinary 200 is not read as a partial rejection', async () => {
+    // The other direction, so the check above cannot pass by failing everything: a
+    // collector that stored the lot answers `{}` or `{"partialSuccess":{}}`.
+    for (const body of ['{}', '{"partialSuccess":{}}', '', 'not json at all']) {
+      const t = rt();
+      const ok = { ...t.rt, post: async () => ({ status: 200, body }) };
+      expect(await main(['otlp', '--projects', root], ok)).toBe(EXIT.OK);
+    }
+  });
+
+  test('sessions that landed before a failure still reach stdout', async () => {
+    // The failure this guards: rows batched until the end are lost entirely when a later
+    // session throws, so a run that posted three sessions and failed on the fourth leaves
+    // no record of the three traces now sitting in Jaeger.
+    const t = rt();
+    let n = 0;
+    const failsOnSecond = {
+      ...t.rt,
+      post: async (url: string, json: string) => {
+        n += 1;
+        t.rt.post(url, json);
+        return n === 1 ? { status: 200, body: '{}' } : { status: 500, body: 'nope' };
+      },
+    };
+    expect(await main(['otlp', '--projects', root], failsOnSecond)).toBe(EXIT.FAILED);
+    const lines = t.out().trimEnd().split('\n');
+    expect(lines[0]).toBe(EXPORT_COLUMNS.join('\t'));
+    // The first session's two domains, and nothing for the one that failed.
+    expect(lines).toHaveLength(3);
+  });
+
+  test('report writes its files and names them on stdout', async () => {
     const t = rt();
     const out = join(root, 'report-out');
-    expect(run(readArgs(['report', '--projects', root, '--out', out]), t.rt)).toBe(EXIT.OK);
+    expect(await run(readArgs(['report', '--projects', root, '--out', out]), t.rt)).toBe(EXIT.OK);
     const written = t.out().trimEnd().split('\n');
     expect(written).toEqual([join(out, 'index.html'), join(out, 'corpus.json')]);
     expect(readFileSync(written[0]!, 'utf8')).toContain('<!doctype html>');
     expect(JSON.parse(readFileSync(written[1]!, 'utf8')).generatedAt).toBe(1_700_000_000_000);
   });
 
-  test('the page states the scope it was given, not just its own heuristic', () => {
+  test('the page states the scope it was given, not just its own heuristic', async () => {
     // [LAW:one-source-of-truth] One list of criteria, holding both narrowings.
     const t = rt();
     const out = join(root, 'report-scoped');
-    run(readArgs(['report', '--projects', root, '--project', 'alpha', '--out', out]), t.rt);
+    await run(readArgs(['report', '--projects', root, '--project', 'alpha', '--out', out]), t.rt);
     const corpusJson = JSON.parse(readFileSync(join(out, 'corpus.json'), 'utf8'));
     expect(corpusJson.selection.criteria.join(' ')).toContain('project matches /alpha/');
     expect(corpusJson.selection.criteria.join(' ')).toContain('transcript length between');
   });
 
-  test('a scoped report counts its scope separately from the machine', () => {
+  test('a scoped report counts its scope separately from the machine', async () => {
     // The masthead asks "how much of what I asked for did you show me", and it can only
     // answer that if the scoped count is its own number rather than folded into either
     // neighbour.
     const t = rt();
     const out = join(root, 'report-inscope');
-    run(readArgs(['report', '--projects', root, '--project', 'alpha', '--out', out]), t.rt);
+    await run(readArgs(['report', '--projects', root, '--project', 'alpha', '--out', out]), t.rt);
     const { selection } = JSON.parse(readFileSync(join(out, 'corpus.json'), 'utf8'));
     expect(selection.discovered).toBe(2);
     expect(selection.inScope).toBe(1);
     expect(selection.rendered).toBe(1);
   });
 
-  test('an unscoped report has nothing to distinguish, and says so', () => {
+  test('an unscoped report has nothing to distinguish, and says so', async () => {
     const t = rt();
     const out = join(root, 'report-unscoped');
-    run(readArgs(['report', '--projects', root, '--out', out]), t.rt);
+    await run(readArgs(['report', '--projects', root, '--out', out]), t.rt);
     const { selection } = JSON.parse(readFileSync(join(out, 'corpus.json'), 'utf8'));
     expect(selection.inScope).toBe(selection.discovered);
   });
@@ -516,29 +783,29 @@ describe('the exit codes are the contract they are documented to be', () => {
   // catch arms used to pass every test.
   const { root, rt } = corpus();
 
-  test('a bad flag is USAGE, and nothing is read or written', () => {
+  test('a bad flag is USAGE, and nothing is read or written', async () => {
     const t = rt();
-    expect(main(['list', '--bogus', 'x'], t.rt)).toBe(EXIT.USAGE);
+    expect(await main(['list', '--bogus', 'x'], t.rt)).toBe(EXIT.USAGE);
     expect(t.out()).toBe('');
     expect(t.err()).toContain('unrecognised argument');
     // A usage error must not have walked the corpus on its way to failing.
     expect(t.err()).not.toContain('scanning');
   });
 
-  test('a misspelled flag in command position is reported as a command', () => {
+  test('a misspelled flag in command position is reported as a command', async () => {
     // `miser --hlep` names no command, and the first token IS the command slot — so the
     // message says so rather than guessing that a flag was intended.
     const t = rt();
-    expect(main(['--hlep'], t.rt)).toBe(EXIT.USAGE);
+    expect(await main(['--hlep'], t.rt)).toBe(EXIT.USAGE);
     expect(t.err()).toContain('unrecognised command `--hlep`');
   });
 
-  test('an unrecognised command is USAGE, not FAILED', () => {
+  test('an unrecognised command is USAGE, not FAILED', async () => {
     const t = rt();
-    expect(main(['stratigraphy'], t.rt)).toBe(EXIT.USAGE);
+    expect(await main(['stratigraphy'], t.rt)).toBe(EXIT.USAGE);
   });
 
-  test('a failure reading real input is FAILED, not USAGE', () => {
+  test('a failure reading real input is FAILED, not USAGE', async () => {
     // The command line was valid; the pipeline broke. A script that retries on USAGE and
     // stops on FAILED can only be written if these stay different numbers.
     const t = rt();
@@ -548,18 +815,18 @@ describe('the exit codes are the contract they are documented to be', () => {
         throw new Error('transcript is not readable');
       },
     };
-    expect(main(['list', '--projects', root], exploding)).toBe(EXIT.FAILED);
+    expect(await main(['list', '--projects', root], exploding)).toBe(EXIT.FAILED);
     expect(t.err()).toContain('transcript is not readable');
   });
 
-  test('a scope that matches nothing is EMPTY, distinct from both', () => {
+  test('a scope that matches nothing is EMPTY, distinct from both', async () => {
     const t = rt();
-    expect(main(['list', '--projects', root, '--session', 'nomatch'], t.rt)).toBe(EXIT.EMPTY);
+    expect(await main(['list', '--projects', root, '--session', 'nomatch'], t.rt)).toBe(EXIT.EMPTY);
   });
 
-  test('help is OK and goes to stdout, because asking is not a mistake', () => {
+  test('help is OK and goes to stdout, because asking is not a mistake', async () => {
     const t = rt();
-    expect(main(['--help'], t.rt)).toBe(EXIT.OK);
+    expect(await main(['--help'], t.rt)).toBe(EXIT.OK);
     expect(t.out()).toContain('usage: miser');
   });
 });
@@ -604,8 +871,14 @@ describe('a failure names the transcript that caused it', () => {
   // for every command, because the guarantee used to hold only for `report` — `list` and
   // `trace` called `analyzeSession` bare, so a throw from deep inside reached stderr with
   // nothing saying which of hundreds of scanned files it came from.
-  for (const command of ['list', 'trace', 'report'] as const) {
-    test(`${command} says which file broke`, () => {
+  //
+  // Read from the command table rather than listed here, so "every command" stays true as
+  // commands are added. Written out by hand it was already false the moment `otlp` landed:
+  // the comment claimed every command and the array named three, so a fourth that dropped
+  // the `naming(...)` wrap would have broken the contract with nothing to catch it.
+  // [LAW:one-source-of-truth]
+  for (const command of SCOPED) {
+    test(`${command} says which file broke`, async () => {
       const t = rt();
       const exploding: Runtime = {
         ...t.rt,
@@ -614,7 +887,7 @@ describe('a failure names the transcript that caused it', () => {
         },
       };
       const argv = [command, '--projects', root, ...(command === 'report' ? ['--out', join(root, `o-${command}`)] : [])];
-      expect(main(argv, exploding)).toBe(EXIT.FAILED);
+      expect(await main(argv, exploding)).toBe(EXIT.FAILED);
       expect(t.err()).toContain('malformed transcript');
       // The contract is that the message NAMES the transcript — not which stage did the
       // naming. `report` fails first in calibration, which has its own wrap and its own
@@ -630,7 +903,11 @@ describe('a flag given an empty value is a usage error, not a filesystem error',
   // under EXIT.FAILED instead of the usage error every other bad value gets.
   for (const flag of FLAG_NAMES) {
     test(`${flag} rejects an empty value`, () => {
-      const command = flag === '--out' ? 'report' : 'list';
+      // Which command to ask comes from the table that decides it, not from a map kept
+      // here by hand: a hand-written one sends a command-specific flag to a command that
+      // refuses it, and the test then passes on the wrong error — or fails for a reason
+      // that has nothing to do with empty values. [LAW:one-source-of-truth]
+      const command = commandsAccepting(flag)[0]!;
       expect(() => readArgs([command, flag, ''])).toThrow(/needs a value/);
     });
   }
@@ -665,5 +942,74 @@ describe('report writes to ./out when nobody says otherwise', () => {
     if (c.kind !== 'report') throw new Error('unreachable');
     expect(c.out).toBe(DEFAULT_OUT);
     expect(USAGE).toContain('relative to the current directory');
+  });
+});
+
+// The one thing in this file that actually opens a socket. Everything else drives `run`
+// with an injected `post`, which is what makes the commands testable — and what left the
+// real edge with no test at all: moving the body read back outside its `try` reintroduced
+// a bug the whole suite still passed. These drive `makePostJson` against sockets that fail
+// in the three ways a collector does, so the naming is asserted rather than described.
+describe('a failed export names the endpoint and the phase', () => {
+  // Bun's own messages for these name none of it — "Unable to connect. Is the computer able
+  // to access the url?", "The socket connection was closed unexpectedly…pass `verbose:
+  // true`…", "The operation timed out." On a run exporting many sessions, each is
+  // unactionable, and the middle one points at a `fetch` option the reader cannot reach.
+  const listening = async (
+    handle: (sock: import('node:net').Socket) => void,
+  ): Promise<{ url: string; close: () => void }> => {
+    const { createServer } = await import('node:net');
+    const server = createServer(handle);
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const addr = server.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+    return { url: `http://127.0.0.1:${addr.port}/v1/traces`, close: () => server.close() };
+  };
+
+  const HEADERS = 'HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{';
+
+  test('a collector that is not there is named, not just "unable to connect"', async () => {
+    // Port 1 is reserved and nothing listens on it, so this is the connect-phase failure.
+    const post = makePostJson(2_000);
+    // The bound is optional in the pattern on purpose: where a firewall DROPs rather
+    // than refuses, this fails as a timeout and the message carries ` after 2s`. Pinning
+    // its absence would fail for an environment reason rather than a behaviour one.
+    await expect(post('http://127.0.0.1:1/v1/traces', '{}')).rejects.toThrow(
+      /127\.0\.0\.1:1\/v1\/traces gave no response( after [\d.]+s)?: /,
+    );
+  });
+
+  test('a collector that answers then drops the connection is named, and the phase is right', async () => {
+    // `verify-otlp.ts` documents this backend doing exactly this — "closes connections
+    // part-way through the body". It is NOT a timeout, so a catch that renamed only
+    // TimeoutError let this one out bare; that is the gap this pins.
+    // FIN after the request lands, never an RST on a timer. `destroy()` resets, and a
+    // reset lets the peer discard data still unread in its receive buffer — which could
+    // drop the very headers this asserts the client saw, flipping the phase for a timing
+    // reason. `end(HEADERS)` writes then closes cleanly, and keying off `data` rather than
+    // a 50ms timer removes the race entirely. [LAW:no-ambient-temporal-coupling]
+    const { url, close } = await listening((sock) => {
+      sock.once('data', () => sock.end(HEADERS));
+    });
+    try {
+      await expect(makePostJson(5_000)(url, '{}')).rejects.toThrow(
+        /\/v1\/traces answered, then failed before its body arrived: /,
+      );
+    } finally {
+      close();
+    }
+  });
+
+  test('a collector that answers then goes silent reports the bound, and does not claim it never answered', async () => {
+    // It DID answer — 200 headers arrived — so "did not answer within 30s" would be false
+    // and would send the reader to `--endpoint` when the spans may already be stored.
+    const { url, close } = await listening((sock) => sock.write(HEADERS));
+    try {
+      await expect(makePostJson(400)(url, '{}')).rejects.toThrow(
+        /answered, then failed before its body arrived after 0\.4s: /,
+      );
+    } finally {
+      close();
+    }
   });
 });

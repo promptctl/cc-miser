@@ -55,6 +55,7 @@ export type Command =
   | { kind: 'help' }
   | { kind: 'list'; scope: Scope }
   | { kind: 'trace'; scope: Scope }
+  | { kind: 'otlp'; scope: Scope; endpoint: string }
   | { kind: 'report'; scope: Scope; out: string; renderLimit: number };
 
 /** Where `report` writes when nobody says: `./out`, resolved against the CURRENT
@@ -82,6 +83,17 @@ export const DEFAULT_OUT = 'out';
  * they are consumed at two different places; a single field would leave "applied twice"
  * representable. */
 export const DEFAULT_RENDER_LIMIT = 24;
+
+/** Where `otlp` posts when nobody says: the OTLP/HTTP port `telemetry/stack.sh` publishes.
+ *
+ * NOT 4318. The well-known OTLP ports are what every telemetry stack on a developer
+ * machine reaches for, so this project's stack yields them and publishes 14317/14318
+ * instead — the reasoning, and the one place both sets are written down, is
+ * `telemetry/README.md` and `telemetry/stack.sh`. Defaulting to the port this repo's own
+ * collector actually listens on is what makes `miser otlp` work with no flag after
+ * `bun run telemetry up`; defaulting to 4318 would silently target whatever unrelated
+ * collector happened to hold the standard port. */
+export const DEFAULT_ENDPOINT = 'http://localhost:14318/v1/traces';
 
 const positiveInt = (flag: string, raw: string): number => {
   const value = Number(raw);
@@ -131,9 +143,10 @@ interface Draft {
   filters: readonly Filter[];
   limit: number | null;
   out: string | null;
+  endpoint: string | null;
 }
 
-const EMPTY: Draft = { projects: null, filters: [], limit: null, out: null };
+const EMPTY: Draft = { projects: null, filters: [], limit: null, out: null, endpoint: null };
 
 const withFilter = (d: Draft, f: Filter): Draft => ({ ...d, filters: [...d.filters, f] });
 
@@ -198,6 +211,14 @@ const FLAGS: Record<string, FlagSpec> = {
     help: ['where report writes its files (report only)', 'default: ./out, relative to the current directory'],
     read: (v) => (d) => ({ ...d, out: v }),
   },
+  '--endpoint': {
+    placeholder: '<url>',
+    help: [
+      'the OTLP/HTTP traces endpoint otlp posts to (otlp only)',
+      `default: ${DEFAULT_ENDPOINT}, the port telemetry/stack.sh publishes`,
+    ],
+    read: (v) => (d) => ({ ...d, endpoint: v }),
+  },
 };
 
 const SCOPE_FLAGS = ['--projects', '--project', '--session', '--since', '--limit'] as const;
@@ -230,6 +251,15 @@ const COMMANDS: Record<Command['kind'], CommandSpec> = {
     accepts: SCOPE_FLAGS,
     build: (_d, scope) => ({ kind: 'trace', scope }),
   },
+  otlp: {
+    help: [
+      'post the span tree of every in-scope session to a collector as',
+      'OTLP, in both the time and the token domain, and write one row',
+      'per (session, domain) with its Jaeger trace id on stdout',
+    ],
+    accepts: [...SCOPE_FLAGS, '--endpoint'],
+    build: (d, scope) => ({ kind: 'otlp', scope, endpoint: d.endpoint ?? DEFAULT_ENDPOINT }),
+  },
   report: {
     // The `--limit` caveat is stated on the command that diverges, so a reader of the
     // usage text learns it at the point it applies rather than being told, everywhere,
@@ -251,6 +281,16 @@ const COMMANDS: Record<Command['kind'], CommandSpec> = {
 };
 
 export const COMMAND_NAMES = Object.keys(COMMANDS) as readonly Command['kind'][];
+
+/** Which commands take a given option, read from the table that decides it.
+ *
+ * [LAW:one-source-of-truth] The refusal message below is built from this, and so is the
+ * test that checks every flag rejects an empty value — which otherwise needs its own map
+ * from flag to a command that accepts it, a copy that goes stale the first time a
+ * command-specific option is added. It went stale exactly that way when `--endpoint`
+ * arrived: the test asked `list` for a flag only `otlp` takes and got the wrong error. */
+export const commandsAccepting = (flag: string): readonly Command['kind'][] =>
+  COMMAND_NAMES.filter((n) => COMMANDS[n].accepts.includes(flag));
 
 /** Every option this tool accepts, from the table that defines them.
  *
@@ -345,7 +385,7 @@ export function readArgs(argv: readonly string[]): Command {
     if (!command.accepts.includes(flag))
       throw new Error(
         `\`${flag}\` is not an option of \`${name}\`. ` +
-          `It applies to: ${COMMAND_NAMES.filter((n) => COMMANDS[n].accepts.includes(flag)).join(', ')}.` +
+          `It applies to: ${commandsAccepting(flag).join(', ')}.` +
           `\n\n${USAGE}`,
       );
     const value = rest[i + 1];
