@@ -190,10 +190,13 @@ A conversation with no call to graft onto at all attaches to the conversation sp
 only the first is a false failure waiting to happen; the script asserted it once and a real
 session proved it wrong.
 
-Point it at a session of a few hundred spans. Jaeger's search returns whole traces and its
-in-memory store truncates the large ones under repeated queries, so a big session tests the
-store rather than the export. A dimension the session does not carry is reported NOT
-EXERCISED rather than passed, so a clean run never claims more than it checked.
+Point it at the smallest session that carries the dimensions you care about. Full coverage
+needs subagent spawns, which puts you at several hundred spans; that is supported, and
+8c55cbcd, 525 spans, exercises every dimension. Jaeger's search returns whole traces and its
+in-memory store cuts the connection part-way through the large ones — 14 of 24 reads there —
+so `truncated response, retrying (n/20)` lines are the run absorbing a known failure, not
+hitting one. A dimension the session does not carry is reported NOT EXERCISED rather than
+passed, so a clean run never claims more than it checked.
 
 ## What this does not do
 
