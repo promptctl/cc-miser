@@ -203,10 +203,17 @@ export interface Conversation {
   /** Tool results whose tool_use block we never saw. Counted, never dropped.
    * [LAW:no-silent-failure] */
   unmatchedToolResults: number;
-  /** Tool results answering an id that already had one. The join keeps a single result
-   * per tool_use, so these are results the analysis does not carry — the same kind of
-   * gap as `unmatchedToolResults`, in the other direction, and counted the same way. */
+  /** Tool results answering an id that already had one AND has a tool_use. The join
+   * keeps a single result per tool_use, so these are results the analysis does not
+   * carry — the same kind of gap as `unmatchedToolResults`, in the other direction.
+   *
+   * The two do not overlap: a repeated result for an id nothing requested is counted
+   * only as unmatched, so the anomalies are partitioned rather than double-reported. */
   duplicateToolResults: number;
+  /** Tool_use blocks whose id was already taken by an earlier one. Each costs that
+   * earlier request its span, since `spans.ts` builds tool spans from the surviving
+   * entries — the request-side twin of `duplicateToolResults`. */
+  duplicateToolUses: number;
 }
 
 const SUMMARY_LEN = 90;
@@ -322,6 +329,7 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
   const arrivals: Arrival[] = [];
   const turns: Turn[] = [];
   const toolUses = new Map<string, { name: string; summary: string; callIndex: number; ts: number }>();
+  let duplicateToolUses = 0;
   const toolResults: Array<{ id: string; chars: number; ts: number }> = [];
 
   for (const line of lines) {
@@ -364,13 +372,29 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
         call.lineCount++;
         for (const block of line.blocks) {
           call.blocks.push(block); // unioned across the whole request group
-          if (isToolUse(block))
+          if (isToolUse(block)) {
+            // A second tool_use under an id already seen REPLACES the first, which costs
+            // that first request its whole span: `spans.ts` builds tool spans from this
+            // map's entries, so an overwritten one is a tool that never appears in the
+            // tree. Counted rather than left silent. [LAW:no-silent-failure]
+            //
+            // Not recovered, deliberately. A tool span's id is `tool:<toolUseId>`, so two
+            // requests sharing an id are two spans sharing a span id — which the store
+            // this stack now runs collapses into one anyway, and which would leave the
+            // report's deep link addressing both at once. A span that is absent and
+            // counted beats one that is present, ambiguous and uncounted.
+            //
+            // Measured on 2026-08-30: 67,251 tool_use blocks, zero blank ids and zero ids
+            // seen twice in a session. `records.ts` defaults a missing id to '', so the
+            // shape is reachable on a malformed transcript even though the corpus has none.
+            if (toolUses.has(block.id)) duplicateToolUses++;
             toolUses.set(block.id, {
               name: block.name,
               summary: display(block.input),
               callIndex: call.index,
               ts: line.ts,
             });
+          }
         }
         break;
       }
@@ -484,10 +508,15 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
   // counts a shape the transcripts do not currently produce — which is the same
   // likelihood `unmatchedToolResults` carries, and the same reason to count it rather
   // than assume it away. [LAW:no-silent-failure]
+  //
+  // ONLY FOR AN ID THAT HAS A tool_use, so the two counters partition the anomalies
+  // instead of overlapping. A repeated result for an id nothing requested is already
+  // described in full by `unmatchedToolResults` — counting it here as well would report
+  // two bad records as three, in the note whose whole job is saying how much was lost.
   const resultOf = new Map<string, { id: string; chars: number; ts: number }>();
   let duplicateToolResults = 0;
   for (const r of toolResults) {
-    if (resultOf.has(r.id)) duplicateToolResults++;
+    if (resultOf.has(r.id) && toolUses.has(r.id)) duplicateToolResults++;
     resultOf.set(r.id, r);
   }
 
@@ -513,5 +542,13 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
     turns[i]!.lastCall = next ? next.firstCall - 1 : Math.max(0, calls.length - 1);
   }
 
-  return { calls, arrivals, tools, turns, unmatchedToolResults, duplicateToolResults };
+  return {
+    calls,
+    arrivals,
+    tools,
+    turns,
+    unmatchedToolResults,
+    duplicateToolResults,
+    duplicateToolUses,
+  };
 }

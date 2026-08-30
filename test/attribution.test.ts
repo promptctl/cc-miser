@@ -36,6 +36,7 @@ const conv = (calls: Call[], arrivals: Arrival[], tools: ToolExec[] = []): Conve
   turns: [],
   unmatchedToolResults: 0,
   duplicateToolResults: 0,
+  duplicateToolUses: 0,
 });
 
 // ---------------------------------------------------------------------------------
