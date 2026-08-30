@@ -321,7 +321,8 @@ function jaegerPanel(s: SessionReport, jaeger: string): string {
       so a session you have not exported opens an empty trace rather than an error. An export
       is a snapshot: a transcript that has grown since its last one is priced here in full and
       present there only up to the calls it had then, so a link to a recent call can land on
-      nothing until you export it again.</p>
+      nothing until you export it again. Doing so is the whole fix — a re-export supersedes
+      the previous one rather than piling up beside it.</p>
   </section>`;
 }
 
