@@ -119,20 +119,36 @@ function exportOf(spec: SessionSpec): OtlpTraces {
   return exportSession(traceFile([analyzed], '/corpus', [], 1_700_000_000_000).sessions[0]!).request;
 }
 
-/** The storage key of every span one export sends, in one domain — spelled the way the
- * store spells it, so what this test compares is what the store compares. */
-function keysIn(req: OtlpTraces, service: string): Map<string, { traceId: string; startTimeUnixNano: string }> {
-  return new Map(
-    req.resourceSpans
-      .filter((rs) =>
-        rs.resource.attributes.some(
-          (a) => a.key === 'service.name' && 'stringValue' in a.value && a.value.stringValue === service,
-        ),
-      )
-      .flatMap((rs) => rs.scopeSpans.flatMap((ss) => ss.spans))
-      .map((s) => [s.spanId, { traceId: s.traceId, startTimeUnixNano: s.startTimeUnixNano }]),
+/** Every span one export sends for one domain.
+ *
+ * [LAW:single-enforcer] How a span is matched to its service is written HERE and nowhere
+ * else in this file. Both questions asked below — what key did a span land on, and which
+ * span is the root — are asked of this one selection, so a change to the resource shape
+ * cannot leave one of them quietly reading the wrong spans. */
+const spansOfService = (req: OtlpTraces, service: string): OtlpTraces['resourceSpans'][number]['scopeSpans'][number]['spans'] =>
+  req.resourceSpans
+    .filter((rs) =>
+      rs.resource.attributes.some(
+        (a) => a.key === 'service.name' && 'stringValue' in a.value && a.value.stringValue === service,
+      ),
+    )
+    .flatMap((rs) => rs.scopeSpans.flatMap((ss) => ss.spans));
+
+/** The storage key of each of those spans — spelled the way the store spells it, so what
+ * this test compares is what the store compares. */
+const keysIn = (req: OtlpTraces, service: string): Map<string, { traceId: string; startTimeUnixNano: string }> =>
+  new Map(
+    spansOfService(req, service).map((s) => [
+      s.spanId,
+      { traceId: s.traceId, startTimeUnixNano: s.startTimeUnixNano },
+    ]),
   );
-}
+
+/** The spans nothing else in the export is a parent of. */
+const rootsIn = (req: OtlpTraces, service: string): string[] =>
+  spansOfService(req, service)
+    .filter((s) => s.parentSpanId === undefined)
+    .map((s) => s.spanId);
 
 const before = exportOf(AT_FIRST_EXPORT);
 const after = exportOf(AFTER_IT_GREW);
@@ -174,20 +190,9 @@ describe('a session that grew re-exports onto its previous export', () => {
       // visible: `verify:otlp` reports the failure as "2 roots", and a reader sees the
       // session twice in the waterfall.
       test('the root span is superseded rather than joined by a second one', () => {
-        const rootsOf = (req: OtlpTraces): string[] =>
-          req.resourceSpans
-            .filter((rs) =>
-              rs.resource.attributes.some(
-                (a) => a.key === 'service.name' && 'stringValue' in a.value && a.value.stringValue === service,
-              ),
-            )
-            .flatMap((rs) => rs.scopeSpans.flatMap((ss) => ss.spans))
-            .filter((s) => s.parentSpanId === undefined)
-            .map((s) => s.spanId);
-
-        expect(rootsOf(before)).toHaveLength(1);
-        expect(rootsOf(after)).toEqual(rootsOf(before));
-        const root = rootsOf(before)[0]!;
+        expect(rootsIn(before, service)).toHaveLength(1);
+        expect(rootsIn(after, service)).toEqual(rootsIn(before, service));
+        const root = rootsIn(before, service)[0]!;
         expect(isSentNow.get(root)!.startTimeUnixNano).toBe(wasSent.get(root)!.startTimeUnixNano);
       });
     });
