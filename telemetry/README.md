@@ -151,19 +151,45 @@ Everything the report can group by is a tag: `model`, `tool_name`, `subagent_typ
 numeric tag across spans, every span also carries its whole subtree's cost already summed,
 as `cc_miser.rollup.*`.
 
-Trace ids are derived from the session rather than drawn at random, so exporting the same
-session twice overwrites it instead of leaving a second copy. That only holds while the
-derivation itself is unchanged: change what goes into the id and the previous export
-becomes an orphan trace beside the new one, which `verify:otlp` catches as `session.id`
-finding two traces. Jaeger's store here is in-memory, so `telemetry down && telemetry up`
-is the reset.
+### Re-exporting, and the one case where it bites
+
+Trace and span ids are derived from the session rather than drawn at random. Re-exporting an
+**unchanged** session is therefore idempotent — measured on a clean store, a 125-span session
+exported twice is still 125 spans, not 250.
+
+Two cases break that, both worth knowing because both are silent in the UI and loud in
+`verify:otlp`:
+
+**The session grew.** A transcript still being written gains calls, so `call:12` may exist in
+the new export and not the old — but `call:3` exists in both, with the same derived id and
+*different* content. This store keeps both. The trace then holds the previous export's spans
+alongside the new ones: `verify:otlp` reports it as two root spans and a span count well over
+what the pipeline would export now. Exporting a live session is fine; exporting it *again*
+later needs a reset first.
+
+**The id derivation changed.** Change what goes into the hash and the previous export becomes
+an orphan trace beside the new one, which shows up as `session.id` finding two traces.
+
+Jaeger's store here is in-memory, so the reset for either is `bun run telemetry down && bun
+run telemetry up`.
 
 `verify:otlp` is what turns that paragraph into a claim you can check: it asks Jaeger — not
-the exporter — whether the trace is there, whether every span arrived, whether subagents
-nest under the tool calls that spawned them, whether the total equals the report's, and
-whether each dimension actually finds the trace when you filter on it. Point it at a
-session of a few hundred spans; Jaeger's search returns whole traces and its in-memory
-store truncates the large ones under repeated queries.
+the exporter — whether the trace is there, whether every span arrived, whether every
+subagent nests under the span that spawned it, whether the total equals the report's, and
+whether each dimension actually finds the trace when you filter on it.
+
+"The span that spawned it" is deliberate and not a hedge: a subagent has three legal
+parents, and a session in this corpus uses all of them. A `tool_use` edge puts it under the
+`claude_code.tool` span. A slash-command fork leaves no `tool_use` block to hang from, so it
+attaches to the `claude_code.llm_request` call it was issued at — 158 of 481 spawns here.
+A conversation with no call to graft onto at all attaches to the conversation span. Expecting
+only the first is a false failure waiting to happen; the script asserted it once and a real
+session proved it wrong.
+
+Point it at a session of a few hundred spans. Jaeger's search returns whole traces and its
+in-memory store truncates the large ones under repeated queries, so a big session tests the
+store rather than the export. A dimension the session does not carry is reported NOT
+EXERCISED rather than passed, so a clean run never claims more than it checked.
 
 ## What this does not do
 

@@ -523,11 +523,19 @@ describe('a command run end to end keeps its two streams apart', () => {
   test('a collector that refuses a session fails the run and names it', async () => {
     const t = rt();
     const refusing = { ...t.rt, post: async () => ({ status: 503, body: 'collector down' }) };
-    expect(await main(['otlp', '--projects', root], refusing)).toBe(EXIT.FAILED);
+    // Scoped to ONE session and asserted against that literal id. Run over both fixtures
+    // and matched with a hex pattern, this passed only because the two sessions happen to
+    // sort the way they do: `applyScope` orders most-recently-modified first, and of the
+    // two ids only `bbbb2222` is hex — `cli11111` contains `l` and `i`. The assertion was
+    // therefore standing on the mtimes of two writes rather than on any behaviour, and a
+    // tie would have failed it while the naming worked perfectly.
+    expect(await main(['otlp', '--projects', root, '--session', 'bbbb2222'], refusing)).toBe(
+      EXIT.FAILED,
+    );
     expect(t.err()).toContain('503');
-    // The session is named, because "the export failed" without which one is a report
-    // nobody can act on.
-    expect(t.err()).toMatch(/rejected session [0-9a-f]{8}/);
+    // The session is named — "the export failed" without which one is a report nobody can
+    // act on.
+    expect(t.err()).toContain('rejected session bbbb2222-2222-3333-4444-555555555555');
   });
 
   test('a collector that stores only part of a session is a failure, not a success', async () => {
@@ -714,7 +722,13 @@ describe('a failure names the transcript that caused it', () => {
   // for every command, because the guarantee used to hold only for `report` — `list` and
   // `trace` called `analyzeSession` bare, so a throw from deep inside reached stderr with
   // nothing saying which of hundreds of scanned files it came from.
-  for (const command of ['list', 'trace', 'report'] as const) {
+  //
+  // Read from the command table rather than listed here, so "every command" stays true as
+  // commands are added. Written out by hand it was already false the moment `otlp` landed:
+  // the comment claimed every command and the array named three, so a fourth that dropped
+  // the `naming(...)` wrap would have broken the contract with nothing to catch it.
+  // [LAW:one-source-of-truth]
+  for (const command of SCOPED) {
     test(`${command} says which file broke`, async () => {
       const t = rt();
       const exploding: Runtime = {

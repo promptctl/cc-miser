@@ -126,8 +126,10 @@ async function search(service: string, tags: Record<string, string>): Promise<Ja
  *
  * That is a flaky read-only GET against a local dev backend, and retrying one is ordinary.
  * What it must not become is a loop that retries until it likes the answer: exhaustion is
- * fatal, and a NON-ZERO HTTP STATUS is never retried, because a 4xx or 5xx is Jaeger
- * answering rather than Jaeger stumbling. [LAW:no-silent-failure]
+ * fatal, and only ONE class of failure takes the retry path at all. A 4xx or 5xx is Jaeger
+ * answering rather than stumbling, and a refused or unresolvable connection means there is
+ * nothing there to stumble — each fails immediately, with its own message.
+ * [LAW:no-silent-failure]
  *
  * The distinction matters more here than usual: a truncated response reaches this script as
  * a trace that could not be found, which reads as "that dimension is not indexed" — a false
@@ -151,9 +153,22 @@ async function jaegerGet(url: string, attempts = 5): Promise<{ data: JaegerTrace
     const err = await new Response(proc.stderr).text();
     const code = await proc.exited;
 
-    // 22 is `--fail-with-body` reporting an HTTP error. Jaeger answered; do not retry it.
-    if (code === 22) throw new Error(`Jaeger refused ${url}: ${body.slice(0, 200)}`);
     if (code === 0 && body !== '') return JSON.parse(body) as { data: JaegerTrace[] | null };
+
+    // WHAT WENT WRONG DECIDES WHAT TO DO, and only ONE of these outcomes is the flake the
+    // retry above exists for. Routing everything that is not an HTTP error through the
+    // truncation path gave the likeliest first-run failure — the stack simply is not up —
+    // five pointless retries and then the wrong diagnosis, `truncated 5 times (curl 7)`,
+    // for a connection that was never made. A message that misnames the cause costs more
+    // than no message. [LAW:no-silent-failure]
+    if (code === 22) throw new Error(`Jaeger refused ${url}: ${body.slice(0, 200)}`);
+    if (code === 6 || code === 7 || code === 28)
+      throw new Error(
+        `cannot reach Jaeger at ${JAEGER} (curl ${code}: ${err.trim()}). ` +
+          `Is the stack up? \`bun run telemetry up && bun run telemetry verify\``,
+      );
+    // Everything left is a connected transfer that did not complete — curl 18 and its
+    // relatives — which is the server closing part-way through a large body.
     if (i === attempts)
       throw new Error(`${url} truncated ${attempts} times (curl ${code}): ${err.trim()}`);
     console.log(`  ..   truncated response, retrying (${i}/${attempts})`);
@@ -193,7 +208,10 @@ for (const domain of DOMAINS) {
   check(
     spans.length === expectedSpans,
     'every span sent is a span stored',
-    `${spans.length} in Jaeger vs ${expectedSpans} exported`,
+    // "would export now", not "exported": the corpus is live. A session still being
+    // written grows between an export and this check, and the honest reading of a
+    // mismatch is either a partial ingest or a stale export — re-export and run again.
+    `${spans.length} in Jaeger vs ${expectedSpans} the pipeline would export now`,
   );
 
   const roots = spans.filter((s) => s.references.filter((r) => r.refType === 'CHILD_OF').length === 0);
@@ -292,9 +310,16 @@ console.log(failures.length === 0 ? 'all checks passed' : `${failures.length} FA
 for (const f of failures) console.log(`  - ${f}`);
 // Printed even on a clean run, and printed LAST, because this is the sentence that says
 // how much a green run is worth. A dimension nothing exercised was not verified.
-if (unexercised.length > 0) {
-  console.log(`\n${unexercised.length} not exercised by this session:`);
-  for (const u of new Set(unexercised)) console.log(`  - ${u}`);
+//
+// ONE collection decides both the count and the list. Every skip fires once per domain and
+// a dimension's presence does not vary between them, so counting the raw array while
+// listing the deduplicated set printed "8 not exercised" above two bullets — a header
+// disagreeing with its own list, in the script whose whole job is keeping "verified" and
+// "never tried" legible. [LAW:one-source-of-truth]
+const distinct = new Set(unexercised);
+if (distinct.size > 0) {
+  console.log(`\n${distinct.size} not exercised by this session:`);
+  for (const u of distinct) console.log(`  - ${u}`);
   console.log('  run again against a session that has them (e.g. one with depth-2 spawns).');
 }
 // [LAW:no-silent-failure] A verification script that exits 0 on failure is worse than no
