@@ -147,15 +147,14 @@ export function collectorSaid(body: string): CollectorSaid {
   if (typeof partial !== 'object' || partial === null) return { kind: 'stored' };
   const rejectedSpans = field(partial as Record<string, unknown>, 'rejectedSpans');
   const errorMessage = field(partial as Record<string, unknown>, 'errorMessage');
-  // The count crosses OTLP/JSON as a string, like every other int64 on this wire.
-  const rejected = Number(rejectedSpans ?? 0);
+  const rejected = spanCount(rejectedSpans);
   const note = typeof errorMessage === 'string' && errorMessage !== '' ? errorMessage : '';
   // A count that will not parse is NOT a count of zero. Reading it as "nothing dropped"
   // would exit OK on the one answer that says spans went missing and that we cannot
   // interpret, so it fails the run with the raw value quoted. We cannot prove the export
   // is whole, and an export that cannot be certified is not a success.
   // [LAW:no-silent-failure]
-  if (!Number.isFinite(rejected))
+  if (rejected === null)
     return {
       kind: 'rejected',
       message: `unreadable rejected-span count ${JSON.stringify(rejectedSpans)}${
@@ -171,6 +170,26 @@ export function collectorSaid(body: string): CollectorSaid {
     message: `${rejected} spans rejected${note === '' ? '' : `: ${note}`}`,
   };
 }
+
+/** The rejected-span count if the collector sent one, `null` if it sent something that is
+ * not a count. Absent is 0 — protojson omits a zero int64, so silence there means nothing
+ * was dropped.
+ *
+ * [LAW:parse-dont-validate] A SHAPE test, not `Number()`. Coercion answers for values that
+ * are not counts at all and answers WRONG in both directions: `Number("")`, `Number(false)`,
+ * `Number([])` and `Number(null)` are all 0, so a body carrying `"rejectedSpans": ""` beside
+ * `"errorMessage": "dropped 4000 spans"` read as nothing-dropped and exited OK — the exact
+ * failure `collectorSaid` exists to prevent, reached through the arm added to prevent it.
+ * The other direction is as bad: `Number(true)` is 1 and `Number([5])` is 5, so non-counts
+ * were being reported AS counts. int64 crosses OTLP/JSON as either a JSON number or a
+ * string of digits; everything else is the collector saying something this cannot read, and
+ * the caller is told so rather than handed a plausible number. */
+const spanCount = (v: unknown): number | null => {
+  if (v === undefined || v === null) return 0;
+  if (typeof v === 'number') return Number.isInteger(v) && v >= 0 ? v : null;
+  if (typeof v === 'string') return /^\d+$/.test(v) ? Number(v) : null;
+  return null;
+};
 
 /** One protojson field under either of its two legal spellings.
  *
@@ -438,34 +457,58 @@ const POST_TIMEOUT_MS = 30_000;
  * through bodies under load, measured on the read path. The write path gets a bound for
  * the same reason.
  *
- * The abort is re-thrown NAMED. Bun raises a `TimeoutError` whose message is the bare
- * "The operation timed out." — true, and useless: it names neither the endpoint it gave up
- * on nor how long it waited, so a reader cannot tell a wedged collector from a wrong
- * `--endpoint`. Trading an indefinite hang for an unactionable message is not the fix.
- * [LAW:no-silent-failure] */
-const postJson: Post = async (url, json) => {
-  // BOTH awaits inside, because the deadline covers both phases and so must the naming.
-  // `AbortSignal.timeout` aborts the response body stream as well as the connection, so a
-  // collector that sends 200 headers and then stalls mid-body rejects at `.text()` — and
-  // wrapped around the `fetch` alone that rejection walks out bare. Measured: one byte
-  // then silence, and the run reported `The operation timed out.` naming neither endpoint
-  // nor wait. The body phase is the one this backend actually stalls in, per
-  // `scripts/verify-otlp.ts`, so leaving it uncovered would have missed the case the
-  // bound was added for.
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: json,
-      signal: AbortSignal.timeout(POST_TIMEOUT_MS),
-    });
-    return { status: res.status, body: await res.text() };
-  } catch (e) {
-    if (e instanceof DOMException && e.name === 'TimeoutError')
-      throw new Error(`${url} did not answer within ${POST_TIMEOUT_MS / 1000}s`);
-    throw e;
-  }
-};
+ * EVERY failure is re-thrown NAMED, which is a rule rather than a list of cases. Measured
+ * under Bun 1.2.23, the three ways one POST fails carry three unrelated messages and not
+ * one names the endpoint:
+ *
+ *   nothing listening   Error         "Unable to connect. Is the computer able to access the url?"
+ *   closed mid-body     Error         "The socket connection was closed unexpectedly. …pass `verbose: true`…"
+ *   silent mid-body     TimeoutError  "The operation timed out."
+ *
+ * Read on a run that exports many sessions, any of those is unactionable: it names neither
+ * which endpoint gave up nor which session was in flight, and the middle one advises a
+ * `fetch` option the reader cannot reach. An earlier version renamed only the
+ * `TimeoutError`, which left the OTHER TWO bare — and the closed-mid-body case is the one
+ * `scripts/verify-otlp.ts` actually documents this backend doing ("closes connections
+ * part-way through the body", reproduced there as ECONNRESET). Enumerating error classes
+ * is how that gap opened, so this does not enumerate: the endpoint and the phase are
+ * attached unconditionally and the original message rides along as detail.
+ * [LAW:dataflow-not-control-flow] [LAW:no-silent-failure]
+ *
+ * The PHASE is tracked because "could not be reached" and "answered, then died" send the
+ * reader to different places — the first to `--endpoint` and whether the collector is up,
+ * the second to a collector that took the request and may already hold the spans. Saying
+ * "did not answer" of a collector that answered 200 and then stalled is simply false.
+ * [LAW:no-ambient-temporal-coupling] the phase is state this function owns, not something
+ * inferred from which line threw. */
+export const makePostJson =
+  (timeoutMs: number = POST_TIMEOUT_MS): Post =>
+  async (url, json) => {
+    // BOTH awaits inside, because the deadline covers both phases and so must the naming.
+    // `AbortSignal.timeout` aborts the response body stream as well as the connection, so
+    // a collector that sends 200 headers and then goes quiet rejects at `.text()`, which a
+    // `try` around the `fetch` alone would not have caught.
+    let answered = false;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: json,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      answered = true;
+      return { status: res.status, body: await res.text() };
+    } catch (e) {
+      const phase = answered ? 'answered, then failed before its body arrived' : 'could not be reached';
+      const bound =
+        e instanceof DOMException && e.name === 'TimeoutError' ? ` after ${timeoutMs / 1000}s` : '';
+      throw new Error(`${url} ${phase}${bound}: ${message(e)}`);
+    }
+  };
+
+/** The timeout injectable ONLY so a test can drive the edge without waiting 30s for it.
+ * `Runtime.post` is the seam the commands use; this is the real wiring behind it. */
+const postJson: Post = makePostJson();
 
 // `import.meta.main` is false when a test imports `run` above, so importing this module
 // never runs a corpus scan as a side effect — the exact trap `src/report/args.ts` was

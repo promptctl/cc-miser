@@ -28,7 +28,7 @@ import {
 } from '../src/cli/args.ts';
 import { COLUMNS, listRow, toTsv, type ListRow } from '../src/cli/list.ts';
 import { EXPORT_COLUMNS } from '../src/cli/otlp.ts';
-import { EXIT, main, run, type Streams } from '../src/cli/main.ts';
+import { EXIT, main, makePostJson, run, type Streams } from '../src/cli/main.ts';
 import { SCHEMA, traceFile, traceNode } from '../src/cli/trace.ts';
 import type { SessionSource } from '../src/discover.ts';
 import { analyzeSession } from '../src/session.ts';
@@ -617,6 +617,42 @@ describe('a command run end to end keeps its two streams apart', () => {
     expect(t.err()).toContain('dropped 4000 spans');
   });
 
+  test('values that are not counts are not read as zero, and not read as counts either', async () => {
+    // `Number()` answers for all of these and answers wrongly in BOTH directions:
+    // `Number("")`, `Number(false)`, `Number([])` are 0 — so a body saying spans were
+    // dropped exited OK — while `Number(true)` is 1 and `Number([5])` is 5, reporting
+    // non-counts AS counts. The shape is what decides, not the coercion.
+    for (const rejectedSpans of ['', ' ', '3.7', 'lots', true, false, [], [5], -1, 2.5]) {
+      const t = rt();
+      const odd = {
+        ...t.rt,
+        post: async () => ({
+          status: 200,
+          body: JSON.stringify({ partialSuccess: { rejectedSpans, errorMessage: 'dropped 4000 spans' } }),
+        }),
+      };
+      expect(await main(['otlp', '--projects', root], odd)).toBe(EXIT.FAILED);
+      expect(t.err()).toContain('unreadable rejected-span count');
+    }
+  });
+
+  test('a count the collector really did send is still read, in both wire forms', async () => {
+    // The other direction, so the shape test above cannot pass by rejecting everything:
+    // int64 crosses OTLP/JSON as a digit string, and a plain JSON number is also legal.
+    for (const rejectedSpans of ['7', 7]) {
+      const t = rt();
+      const real = {
+        ...t.rt,
+        post: async () => ({
+          status: 200,
+          body: JSON.stringify({ partialSuccess: { rejectedSpans, errorMessage: 'too big' } }),
+        }),
+      };
+      expect(await main(['otlp', '--projects', root], real)).toBe(EXIT.FAILED);
+      expect(t.err()).toContain('7 spans rejected');
+    }
+  });
+
   test('an ordinary 200 is not read as a partial rejection', async () => {
     // The other direction, so the check above cannot pass by failing everything: a
     // collector that stored the lot answers `{}` or `{"partialSuccess":{}}`.
@@ -855,5 +891,67 @@ describe('report writes to ./out when nobody says otherwise', () => {
     if (c.kind !== 'report') throw new Error('unreachable');
     expect(c.out).toBe(DEFAULT_OUT);
     expect(USAGE).toContain('relative to the current directory');
+  });
+});
+
+// The one thing in this file that actually opens a socket. Everything else drives `run`
+// with an injected `post`, which is what makes the commands testable — and what left the
+// real edge with no test at all: moving the body read back outside its `try` reintroduced
+// a bug the whole suite still passed. These drive `makePostJson` against sockets that fail
+// in the three ways a collector does, so the naming is asserted rather than described.
+describe('a failed export names the endpoint and the phase', () => {
+  // Bun's own messages for these name none of it — "Unable to connect. Is the computer able
+  // to access the url?", "The socket connection was closed unexpectedly…pass `verbose:
+  // true`…", "The operation timed out." On a run exporting many sessions, each is
+  // unactionable, and the middle one points at a `fetch` option the reader cannot reach.
+  const listening = async (
+    handle: (sock: import('node:net').Socket) => void,
+  ): Promise<{ url: string; close: () => void }> => {
+    const { createServer } = await import('node:net');
+    const server = createServer(handle);
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const addr = server.address();
+    if (addr === null || typeof addr === 'string') throw new Error('no port');
+    return { url: `http://127.0.0.1:${addr.port}/v1/traces`, close: () => server.close() };
+  };
+
+  const HEADERS = 'HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{';
+
+  test('a collector that is not there is named, not just "unable to connect"', async () => {
+    // Port 1 is reserved and nothing listens on it, so this is the connect-phase failure.
+    const post = makePostJson(2_000);
+    await expect(post('http://127.0.0.1:1/v1/traces', '{}')).rejects.toThrow(
+      /127\.0\.0\.1:1\/v1\/traces could not be reached: /,
+    );
+  });
+
+  test('a collector that answers then drops the connection is named, and the phase is right', async () => {
+    // `verify-otlp.ts` documents this backend doing exactly this — "closes connections
+    // part-way through the body". It is NOT a timeout, so a catch that renamed only
+    // TimeoutError let this one out bare; that is the gap this pins.
+    const { url, close } = await listening((sock) => {
+      sock.write(HEADERS);
+      setTimeout(() => sock.destroy(), 50);
+    });
+    try {
+      await expect(makePostJson(5_000)(url, '{}')).rejects.toThrow(
+        /\/v1\/traces answered, then failed before its body arrived: /,
+      );
+    } finally {
+      close();
+    }
+  });
+
+  test('a collector that answers then goes silent reports the bound, and does not claim it never answered', async () => {
+    // It DID answer — 200 headers arrived — so "did not answer within 30s" would be false
+    // and would send the reader to `--endpoint` when the spans may already be stored.
+    const { url, close } = await listening((sock) => sock.write(HEADERS));
+    try {
+      await expect(makePostJson(400)(url, '{}')).rejects.toThrow(
+        /answered, then failed before its body arrived after 0\.4s: /,
+      );
+    } finally {
+      close();
+    }
   });
 });
