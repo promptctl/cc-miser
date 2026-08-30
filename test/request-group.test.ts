@@ -15,7 +15,7 @@
 import { expect, test, describe } from 'bun:test';
 import { buildConversation } from '../src/calls.ts';
 import { parseTranscript } from '../src/records.ts';
-import { placeholderTailSession, twoCallSession } from './fixtures.ts';
+import { duplicateToolResultSession, placeholderTailSession, twoCallSession } from './fixtures.ts';
 
 const convOf = (text: string) => buildConversation(parseTranscript(text).lines);
 
@@ -64,6 +64,48 @@ describe('usage is the completed snapshot, not the first', () => {
       cacheRead: 86159,
       output: 278,
     });
+  });
+});
+
+// A tool_use is joined to at most ONE result, so a transcript offering two leaves one of
+// them out of every downstream figure. That the leftover is COUNTED is the whole reason
+// the counter exists, and a counter nothing exercises is a comment with a number in it —
+// the corpus has zero instances, so nothing else in the suite would notice it break.
+describe('a second result for one tool_use is counted, not swallowed', () => {
+  const conv = convOf(duplicateToolResultSession());
+
+  test('the extra result is reported', () => {
+    expect(conv.duplicateToolResults).toBe(1);
+  });
+
+  test('the surviving execution carries the LAST result', () => {
+    // Last-wins is what the join's overwrite means, and it is the half a future
+    // reordering would break while leaving the count above still correct.
+    expect(conv.tools.length).toBe(1);
+    expect(conv.tools[0]!.resultChars).toBe('second-and-longer'.length);
+  });
+});
+
+// The two counters must PARTITION the anomalies rather than overlap, and only an id with
+// no tool_use can tell the difference: a repeated result for a matched id is a duplicate
+// under either rule. Two results for an id nothing requested are two unmatched records
+// and nothing else — counting one of them as a duplicate as well would report two bad
+// records as three, in the note whose job is saying how much was lost.
+describe('a repeated result for an id nothing requested is only unmatched', () => {
+  const conv = convOf(duplicateToolResultSession('toolu_never_issued'));
+
+  test('both results count as unmatched', () => {
+    expect(conv.unmatchedToolResults).toBe(2);
+  });
+
+  test('neither is also counted as a duplicate', () => {
+    expect(conv.duplicateToolResults).toBe(0);
+  });
+
+  test('the tool that WAS requested is still carried, unanswered', () => {
+    expect(conv.tools.length).toBe(1);
+    expect(conv.tools[0]!.tsEnd).toBeNull();
+    expect(conv.tools[0]!.resultChars).toBeNull();
   });
 });
 
