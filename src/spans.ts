@@ -113,6 +113,27 @@ export const isToolSpan = (s: Span): s is ToolSpan => s.detail.kind === 'tool';
  * that a review subagent's entire burn is review cost. */
 export type ActivityResolver = (callIndex: number) => Label;
 
+/** The id of a call node, in the conversation identified by `prefix`.
+ *
+ * A FUNCTION RATHER THAN A TEMPLATE AT EACH SITE, because the report now names call
+ * nodes too — it anchors a finding to the call it is about so the page can link that
+ * call to its span in Jaeger. The span id Jaeger indexes is a digest OVER this string
+ * (`jaeger.ts`), so a report spelling `call:<n>` itself would be a second copy of a
+ * grammar this module owns, and a drift between them produces a well-formed link to a
+ * span that does not exist — wrong silently, in the direction nobody checks.
+ * [LAW:one-source-of-truth] The other four node kinds keep their literals: they have
+ * one writer each, and a constructor with a single caller states a sharing that isn't
+ * there. */
+const callId = (prefix: string, index: number): string => `call:${prefix}${index}`;
+
+/** The id of a call in the ROOT conversation — the one a human was reading.
+ *
+ * The root's prefix is empty (`buildConversationSpan` derives it from an empty lineage),
+ * and this states that once so a consumer outside this module never has to know it.
+ * Spawned conversations prefix their ids with an agent id, which is why this is
+ * deliberately narrow: it is the only shape reachable from a `CallRow.index`. */
+export const rootCallId = (index: number): string => callId('', index);
+
 /** Build the span tree for one session, grafting every conversation it spawned.
  *
  * [LAW:dataflow-not-control-flow] The SAME function runs at every depth. A root
@@ -226,7 +247,7 @@ function buildConversationSpan(
   const callSpans = new Map<number, Span>();
   for (const c of conv.calls) {
     callSpans.set(c.index, {
-      id: `call:${idPrefix}${c.index}`,
+      id: callId(idPrefix, c.index),
       label:
         lineage.length === 0 ? `call ${c.index}` : `${immediateAgent(lineage)!.agentType} call ${c.index}`,
       detail: {

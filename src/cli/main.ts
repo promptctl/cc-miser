@@ -417,7 +417,7 @@ export async function run(command: Command, rt: Runtime): Promise<number> {
       mkdirSync(command.out, { recursive: true });
       const html = join(command.out, 'index.html');
       const json = join(command.out, 'corpus.json');
-      writeFileSync(html, renderCorpus(corpus));
+      writeFileSync(html, renderCorpus(corpus, command.jaeger));
       writeFileSync(json, JSON.stringify(corpus, null, 2));
       streams.out(`${html}\n${json}\n`);
 

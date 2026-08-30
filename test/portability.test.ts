@@ -67,6 +67,12 @@ const corpusOf = (sessions: SessionReport[], selection: Selection): CorpusReport
   output: ZERO_OUTPUT,
 });
 
+/** Deliberately NOT `localhost`, so these tests cannot pass on a default that happens to
+ * be baked in somewhere: every Jaeger URL in the rendered page has to have come from the
+ * argument. */
+const JAEGER = 'https://jaeger.example:9999';
+const render = (c: CorpusReport): string => renderCorpus(c, JAEGER);
+
 describe('a project heading names the project, on a machine nobody here has used', () => {
   test('the leaf name comes back from a foreign home layout and username', () => {
     expect(foreignSession().workspace.name).toBe('my-project');
@@ -101,7 +107,7 @@ describe('a project heading names the project, on a machine nobody here has used
   });
 
   test('no machine-specific string reaches the rendered page', () => {
-    const html = renderCorpus(
+    const html = render(
       corpusOf([foreignSession()], { discovered: 1, inScope: 1, rendered: 1, criteria: [] }),
     );
     expect(html).toContain('my-project');
@@ -115,7 +121,7 @@ describe('the page states what it covers', () => {
   const sessions = [foreignSession()];
 
   test('a filtered sample does not call itself every session', () => {
-    const html = renderCorpus(
+    const html = render(
       corpusOf(sessions, {
         discovered: 271,
         inScope: 271,
@@ -129,7 +135,7 @@ describe('the page states what it covers', () => {
   });
 
   test('the filters that decided the sample are on the page', () => {
-    const html = renderCorpus(
+    const html = render(
       corpusOf(sessions, {
         discovered: 271,
         inScope: 271,
@@ -144,7 +150,7 @@ describe('the page states what it covers', () => {
     // `--project foo` on a 500-session machine where all 3 foo sessions render: the page
     // showed everything it was asked for, and calling that "3 of 500" reports arbitrary
     // omission that did not happen.
-    const html = renderCorpus(
+    const html = render(
       corpusOf(sessions, { discovered: 500, inScope: 3, rendered: 3, criteria: ['project foo'] }),
     );
     expect(html).not.toContain('A sample of the scope');
@@ -155,7 +161,7 @@ describe('the page states what it covers', () => {
   });
 
   test('a scoped run counts its sample against the scope, not the machine', () => {
-    const html = renderCorpus(
+    const html = render(
       corpusOf(sessions, { discovered: 500, inScope: 20, rendered: 3, criteria: ['project foo'] }),
     );
     expect(html).toContain('3 of 20 sessions in scope');
@@ -165,7 +171,7 @@ describe('the page states what it covers', () => {
   test('a scoped page still states what the machine held', () => {
     // The scope narrowing must not cost the reader the denominator that says how much of
     // the machine they are NOT looking at.
-    const html = renderCorpus(
+    const html = render(
       corpusOf(sessions, { discovered: 500, inScope: 20, rendered: 3, criteria: ['project foo'] }),
     );
     expect(html).toContain('500 sessions found under the');
@@ -173,7 +179,7 @@ describe('the page states what it covers', () => {
   });
 
   test('a page that really did cover everything may still say so', () => {
-    const html = renderCorpus(
+    const html = render(
       corpusOf(sessions, { discovered: 1, inScope: 1, rendered: 1, criteria: [] }),
     );
     expect(html).toContain('Every session');

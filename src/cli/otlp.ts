@@ -32,8 +32,13 @@
 // masquerades as native, and nothing native names is renamed. The schema is
 // `reference/docs/CLAUDE_CODE_MONITORING.md`.
 
-import { createHash } from 'node:crypto';
 import { spend } from '../tokens.ts';
+import {
+  DOMAINS as TRACE_DOMAINS,
+  type DomainKey,
+  spanIdOf,
+  traceIdOf,
+} from '../jaeger.ts';
 import { SCHEMA, type TraceNode, type TraceSession } from './trace.ts';
 import { header, row } from './tsv.ts';
 
@@ -90,28 +95,6 @@ const int = (key: string, value: number): KeyValue => ({
   key,
   value: { intValue: String(Math.round(value)) },
 });
-
-// ─── Identity ──────────────────────────────────────────────────────────────────────
-
-/** Trace and span ids, derived from what the span already is rather than drawn at random.
- *
- * Deterministic on purpose: re-exporting a session after a pipeline change overwrites the
- * same trace in Jaeger instead of leaving a second copy beside it, so "what does this
- * session look like now" has one answer. [FRAMING:representation]
- *
- * The session id is mixed in at every level because span ids are NOT unique across
- * sessions on their own: `turn:0` is the literal id of the first turn of every root
- * conversation in the corpus, and `spans.ts` only prefixes ids inside spawned
- * conversations.
- *
- * The parts are joined on a separator that cannot occur inside any of them, and that is
- * what keeps the digest unambiguous: joined on nothing, `("ab", "c")` and `("a", "bc")`
- * are one string and therefore one span id. A newline does the job here — session ids are
- * UUIDs, service names are literals, and `spans.ts` builds node ids out of colons — and it
- * is written as an ESCAPE. A raw control byte in the source makes the entire file binary
- * to git, which silently costs every future reviewer the diff. */
-const hexId = (bytes: number, ...parts: readonly string[]): string =>
-  createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, bytes * 2);
 
 // ─── Layout: the two domains ───────────────────────────────────────────────────────
 
@@ -217,21 +200,40 @@ const tokenLayout: Layout = (node) => tokenExtent(node, nsOf(node.tStart));
  * convention for a reader to remember, no trace that mixes the two, and no way to compare
  * a duration against a cost by accident. */
 interface Domain {
+  /** Which domain this is, in the vocabulary `jaeger.ts` defines. Carried rather than
+   * re-derived from `service`, because the id functions are keyed on it and recovering a
+   * key by searching for a service string would be reading a fact out of its rendering. */
+  key: DomainKey;
+  /** `service`, `label` and `unit` arrive from `jaeger.ts` and are documented there —
+   * spread in below rather than restated, so this file has no opinion about their
+   * values it could hold after that file changed them. */
   service: string;
-  /** What one nanosecond on this domain's axis means, carried as an attribute because
-   * Jaeger will label the axis in time units either way. */
+  label: string;
   unit: string;
   layout: Layout;
 }
 
+/** How each domain lays a tree out on the time axis — the ONLY thing this module adds to
+ * a domain's shared identity.
+ *
+ * [LAW:types-are-the-program] A `Record` keyed by `DomainKey` rather than a second list,
+ * so the compiler checks the set both ways: a domain added in `jaeger.ts` cannot reach
+ * the exporter without a layout, and a layout cannot outlive the domain it was for. */
+const LAYOUTS: Record<DomainKey, Layout> = { time: timeLayout, tokens: tokenLayout };
+
 /** [LAW:dataflow-not-control-flow] Both domains, always, on every export — a table to
  * iterate rather than a `--domain` flag to pass. A flag would make the common case
  * ("show me this session") two commands, leave every trace half-emitted, and add a mode
- * with no deletion date. [LAW:no-mode-explosion] */
-export const DOMAINS: readonly Domain[] = [
-  { service: 'cc-miser-time', unit: 'wall clock', layout: timeLayout },
-  { service: 'cc-miser-tokens', unit: 'one millisecond = one input-equivalent token', layout: tokenLayout },
-];
+ * with no deletion date. [LAW:no-mode-explosion]
+ *
+ * Built by joining `jaeger.ts`'s identities to the layouts above rather than restating
+ * the service names here. Those names are mixed into the trace-id digest, and the report
+ * links to ids computed from them, so a literal at this end is a second clock on the one
+ * string both ends must agree about. [LAW:one-source-of-truth] Declaration order in that
+ * record is this array's order. */
+export const DOMAINS: readonly Domain[] = (
+  Object.keys(TRACE_DOMAINS) as readonly DomainKey[]
+).map((key) => ({ key, ...TRACE_DOMAINS[key], layout: LAYOUTS[key] }));
 
 // ─── Names and attributes ──────────────────────────────────────────────────────────
 
@@ -426,9 +428,9 @@ function domainExport(
   session: TraceSession,
   domain: Domain,
 ): { resourceSpans: OtlpTraces['resourceSpans'][number]; row: ExportRow } {
-  const traceId = hexId(16, domain.service, session.session);
-  const spanIdOf = (node: TraceNode): string => hexId(8, domain.service, session.session, node.id);
-  const spans = flatten(session.tree, domain.layout(session.tree), traceId, undefined, spanIdOf);
+  const traceId = traceIdOf(domain.key, session.session);
+  const spanIdFor = (node: TraceNode): string => spanIdOf(domain.key, session.session, node.id);
+  const spans = flatten(session.tree, domain.layout(session.tree), traceId, undefined, spanIdFor);
   return {
     row: {
       session: session.session,

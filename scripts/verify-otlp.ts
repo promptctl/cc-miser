@@ -22,11 +22,15 @@ import { readFileSync } from 'node:fs';
 import { discoverSessions, projectsRoot } from '../src/discover.ts';
 import { listRow } from '../src/cli/list.ts';
 import { DOMAINS, GROUPABLE, exportSession } from '../src/cli/otlp.ts';
+import { DEFAULT_JAEGER } from '../src/jaeger.ts';
 import { traceFile } from '../src/cli/trace.ts';
 import { analyzeSession } from '../src/session.ts';
 
 const [prefix, jaegerArg] = process.argv.slice(2);
-const JAEGER = jaegerArg ?? 'http://localhost:17686';
+// The same constant the report's links are built from, so the address this script proves
+// spans arrived at and the address the page sends a reader to cannot drift apart.
+// [LAW:one-source-of-truth]
+const JAEGER = jaegerArg ?? DEFAULT_JAEGER;
 if (prefix === undefined || prefix === '') {
   console.error('usage: bun run verify:otlp <session-id-prefix> [jaeger-url]');
   process.exit(2);
