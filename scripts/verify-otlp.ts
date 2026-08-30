@@ -120,9 +120,20 @@ async function search(service: string, tags: Record<string, string>): Promise<Ja
  * API returns WHOLE traces — no projection, no id-only form — so each of the two dozen
  * queries below re-serialises the entire trace, 2.5MB for a 1,463-span session. Under that
  * repetition `jaeger-all-in-one`'s memory store closes connections part-way through the
- * body, and it is the SERVER doing it: the failure reproduces at roughly a third of reads
- * through Bun's `fetch` (as ECONNRESET), through curl into a pipe, and through curl
- * straight to a file — three clients, one behaviour. Identical requests then succeed.
+ * body, and it is the SERVER doing it: the failure reproduces through Bun's `fetch` (as
+ * ECONNRESET), through curl into a pipe, and through curl straight to a file — three
+ * clients, one behaviour. Identical requests then succeed.
+ *
+ * HOW OFTEN IT FAILS DECIDES THE BUDGET, which is why the number below is measured and not
+ * estimated. Against the 525-span domain of session `8c55cbcd` — an 894KB response, and the
+ * very session `telemetry/README.md` hands you to verify — 14 of 24 reads truncated on
+ * 2026-08-30: a 58% per-read failure rate. An earlier estimate of "roughly a third" sized
+ * this budget at 5, which leaves 0.58^5 ≈ 7% per query and, over the two dozen queries a run
+ * makes, failed FOUR RUNS IN FIVE — the shape the bug actually took, on the one command the
+ * README promises will prove the export arrived. Twenty attempts gives 0.58^20 ≈ 2e-5 per
+ * query, under one run in a thousand. Re-measure before retuning it: the measurement is the
+ * reason and the constant is only its residue, and it was the two drifting apart that broke
+ * this. [FRAMING:representation]
  *
  * That is a flaky read-only GET against a local dev backend, and retrying one is ordinary.
  * What it must not become is a loop that retries until it likes the answer: exhaustion is
@@ -135,15 +146,19 @@ async function search(service: string, tags: Record<string, string>): Promise<Ja
  * a trace that could not be found, which reads as "that dimension is not indexed" — a false
  * finding about the exporter, manufactured by the transport.
  *
- * Response size drives the failure rate, so point this at a session of a few hundred spans.
- * Every dimension is emitted by the same code path at any size, and a small trace proves
- * the indexing exactly as well while leaving the answer unconfounded.
+ * Response size drives that rate, so prefer the smallest session that still carries the
+ * dimensions you need: every dimension is emitted by the same code path at any size, and a
+ * small trace proves the indexing exactly as well while leaving the answer unconfounded.
+ * Small is not automatically sufficient, though, and the tension is real — the four subagent
+ * checks stay NOT EXERCISED until the session has spawns, and a session with spawns is a
+ * session of hundreds of spans. The budget above is what keeps that unavoidably larger
+ * session readable, so the two halves of the advice stop contradicting each other.
  *
  * curl rather than `fetch` because `telemetry/stack.sh` already queries this same API with
  * it, and because its exit codes separate a closed transfer from a refusal where `fetch`
  * gives one opaque reset. Its streams are drained one at a time: read concurrently with
  * `Promise.all`, the same queries succeeded 1 time in 5 rather than 4. */
-async function jaegerGet(url: string, attempts = 5): Promise<{ data: JaegerTrace[] | null }> {
+async function jaegerGet(url: string, attempts = 20): Promise<{ data: JaegerTrace[] | null }> {
   for (let i = 1; i <= attempts; i++) {
     const proc = Bun.spawn(['curl', '-sS', '--fail-with-body', url], {
       stdout: 'pipe',
@@ -158,9 +173,9 @@ async function jaegerGet(url: string, attempts = 5): Promise<{ data: JaegerTrace
     // WHAT WENT WRONG DECIDES WHAT TO DO, and only ONE of these outcomes is the flake the
     // retry above exists for. Routing everything that is not an HTTP error through the
     // truncation path gave the likeliest first-run failure — the stack simply is not up —
-    // five pointless retries and then the wrong diagnosis, `truncated 5 times (curl 7)`,
-    // for a connection that was never made. A message that misnames the cause costs more
-    // than no message. [LAW:no-silent-failure]
+    // a full budget of pointless retries and then the wrong diagnosis, `truncated 20 times
+    // (curl 7)`, for a connection that was never made. A message that misnames the cause
+    // costs more than no message. [LAW:no-silent-failure]
     if (code === 22) throw new Error(`Jaeger refused ${url}: ${body.slice(0, 200)}`);
     if (code === 6 || code === 7 || code === 28)
       throw new Error(
@@ -172,7 +187,10 @@ async function jaegerGet(url: string, attempts = 5): Promise<{ data: JaegerTrace
     if (i === attempts)
       throw new Error(`${url} truncated ${attempts} times (curl ${code}): ${err.trim()}`);
     console.log(`  ..   truncated response, retrying (${i}/${attempts})`);
-    await new Promise((r) => setTimeout(r, 200 * i));
+    // Capped, because this is politeness and not backoff: the store needs no recovery time —
+    // identical requests succeed immediately — while an uncapped 200ms×i across twenty
+    // attempts would sit out 38s per query waiting for nothing to happen.
+    await new Promise((r) => setTimeout(r, Math.min(200 * i, 500)));
   }
   throw new Error('unreachable');
 }
