@@ -161,10 +161,15 @@ export function collectorSaid(body: string): CollectorSaid {
 
 /** Discover, then narrow — the spine every command shares.
  *
- * [LAW:dataflow-not-control-flow] One scoping rule for all three commands. `list`,
- * `trace` and `report` differ in what they EMIT, never in which sessions they are
- * about, so the scope cannot mean one thing on one command and something else on
- * another. */
+ * [LAW:dataflow-not-control-flow] One scoping rule for every command that takes a scope.
+ * They differ in what they EMIT, never in which sessions they are about, so the scope
+ * cannot mean one thing on one command and something else on another.
+ *
+ * Deliberately not a list of names. `test/cli.test.ts` reads the command table for the
+ * same reason, having already been caught out: its hand-written array said three while
+ * the comment above it claimed every command, and `otlp` made that false the day it
+ * landed. A sentence that has to be recounted on every new command is a copy that will
+ * drift. [LAW:one-source-of-truth] */
 function scoped(
   scope: Scope,
   { env, streams }: Runtime,
