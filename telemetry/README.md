@@ -173,6 +173,10 @@ an orphan trace beside the new one, which shows up as `session.id` finding two t
 Jaeger's store here is in-memory, so the reset for either is `bun run telemetry down && bun
 run telemetry up`.
 
+Resetting the whole store to refresh one session is a workaround, not an answer — a session
+still in progress is exactly the one you want to look at, so re-exporting it is ordinary
+usage. `miser-tracing-yhc.5` holds that work and the three routes out of it.
+
 `verify:otlp` is what turns that paragraph into a claim you can check: it asks Jaeger — not
 the exporter — whether the trace is there, whether every span arrived, whether every
 subagent nests under the span that spawned it, whether the total equals the report's, and
