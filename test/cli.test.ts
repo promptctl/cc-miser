@@ -656,8 +656,11 @@ describe('a command run end to end keeps its two streams apart', () => {
   test('a null count is the field default, not an unreadable one', async () => {
     // proto3's JSON mapping defines JSON null on a scalar as the field's default, so this
     // says zero rejected — same as omitting the field, which is what protojson does with a
-    // zero int64. Pinned because the shape test deliberately does NOT route it to the
-    // unreadable arm, and that is a decision rather than an oversight.
+    // zero int64. Asserted as BEHAVIOUR, not as which line handles it: `field`'s `??`
+    // collapses an explicit null to undefined before `spanCount` is reached, so the null
+    // arm inside `spanCount` is not what this exercises. What it pins is the contract —
+    // a null count is the default and the run survives — which is the part that must not
+    // change however the two functions divide the work. [LAW:behavior-not-structure]
     const t = rt();
     const nulled = {
       ...t.rt,
@@ -683,6 +686,22 @@ describe('a command run end to end keeps its two streams apart', () => {
     };
     expect(await main(['otlp', '--projects', root], huge)).toBe(EXIT.FAILED);
     expect(t.err()).toContain('9007199254740993 spans rejected');
+  });
+
+  test('a JSON number too large to state exactly is refused, not approximated', async () => {
+    // The other int64 spelling cannot be echoed: `JSON.parse` rounds 9007199254740993 to
+    // …992 before anything here sees it, so the digits are already gone. Reporting the
+    // rounded value would be the wrong-figure failure by another route, and `1e21` would
+    // otherwise pass a plain isInteger check and print "1e+21 spans rejected".
+    for (const body of [
+      '{"partialSuccess":{"rejectedSpans":9007199254740993}}',
+      '{"partialSuccess":{"rejectedSpans":1e21}}',
+    ]) {
+      const t = rt();
+      const big = { ...t.rt, post: async () => ({ status: 200, body }) };
+      expect(await main(['otlp', '--projects', root], big)).toBe(EXIT.FAILED);
+      expect(t.err()).toContain('unreadable rejected-span count');
+    }
   });
 
   test('an ordinary 200 is not read as a partial rejection', async () => {

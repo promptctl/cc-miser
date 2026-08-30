@@ -192,8 +192,17 @@ export function collectorSaid(body: string): CollectorSaid {
  * say any were dropped" and "what exactly did it say". Parsing to a `number` quietly
  * rounded a digit string past 2^53, so a collector reporting 9007199254740993 was printed
  * back 9007199254740992: a wrong figure handed to the operator by the one function whose
- * job is never to hand them a plausible wrong figure. Keeping the collector's own text
- * makes the rounding unrepresentable rather than guarded against. */
+ * job is never to hand them a plausible wrong figure. For the STRING spelling, echoing the
+ * collector's own digits makes that unrepresentable.
+ *
+ * The NUMBER spelling cannot be rescued the same way and is refused instead of reported.
+ * `JSON.parse` rounds before this ever sees the value, so by the time `9007199254740993`
+ * arrives it is already `…992` and the original digits are gone — echoing is not on offer.
+ * `Number.isSafeInteger` is therefore the test, not `Number.isInteger`: anything past 2^53
+ * is a value this cannot state faithfully, and `1e21` would otherwise pass the shape test
+ * and print as `1e+21 spans rejected`, a "count" of nothing. Unreadable is the honest
+ * answer for both — the caller is told the collector said something unrepresentable rather
+ * than handed a number that is merely close. */
 interface RejectedCount {
   isZero: boolean;
   /** The collector's own digits, echoed rather than reformatted. */
@@ -202,7 +211,7 @@ interface RejectedCount {
 const spanCount = (v: unknown): RejectedCount | null => {
   if (v === undefined || v === null) return { isZero: true, text: '0' };
   if (typeof v === 'number')
-    return Number.isInteger(v) && v >= 0 ? { isZero: v === 0, text: String(v) } : null;
+    return Number.isSafeInteger(v) && v >= 0 ? { isZero: v === 0, text: String(v) } : null;
   if (typeof v === 'string')
     return /^\d+$/.test(v) ? { isZero: /^0+$/.test(v), text: v } : null;
   return null;
@@ -318,11 +327,16 @@ export async function run(command: Command, rt: Runtime): Promise<number> {
         // below name the session. A network failure was the one export failure naming
         // neither, so on a 700-session run the operator had to infer which session died
         // from the last row on stdout. [LAW:no-silent-failure] [LAW:decomposition]
-        const { status, body } = await rt
-          .post(command.endpoint, JSON.stringify(request))
-          .catch((e: unknown) => {
-            throw new Error(`exporting session ${session.session}: ${message(e)}`);
-          });
+        // `try`, not `.catch`: a `Post` that throws synchronously — a fake, or an impl
+        // that validates its arguments before returning a promise — never reaches a
+        // rejection handler, and would escape with the session unnamed.
+        let answer: PostResult;
+        try {
+          answer = await rt.post(command.endpoint, JSON.stringify(request));
+        } catch (e) {
+          throw new Error(`exporting session ${session.session}: ${message(e)}`);
+        }
+        const { status, body } = answer;
 
         // [LAW:no-silent-failure] Checked after every call, before anything downstream
         // treats the export as done. A collector that refuses a session and a collector
