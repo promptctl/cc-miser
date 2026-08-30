@@ -16,6 +16,7 @@ import {
   isToolSpan,
   rollup,
   rollupWhere,
+  rootCallId,
   type Span,
 } from '../spans.ts';
 import { depthOf } from '../lineage.ts';
@@ -41,12 +42,22 @@ import type {
   CallRow,
   Coverage,
   Finding,
-  FlameNode,
   Ledger,
   SessionReport,
+  SpanAnchor,
   Stratum,
   StratumSource,
 } from './model.ts';
+
+/** A finding's anchor onto a call of the root conversation.
+ *
+ * The id comes from `spans.ts`'s own constructor rather than a template written here, so
+ * the string this report links on and the string the exporter hashes are the same string.
+ * [LAW:one-source-of-truth] */
+const atCall = (index: number): SpanAnchor => ({
+  nodeId: rootCallId(index),
+  label: `call ${index}`,
+});
 
 const fmt = (n: number): string => Math.round(n).toLocaleString();
 const pct = (n: number, d: number): string => (d === 0 ? '0.0' : ((n / d) * 100).toFixed(1));
@@ -284,7 +295,6 @@ export function projectSession(a: AnalyzedSession, models: ModelTable): SessionR
     ],
     findings: findingsFor(a, exact, spawnedOnly, grandTotal, output, pricing, models, calls),
     strata: strataFor(a),
-    flame: flameOf(a.tree),
     synopsis: synopsisFor(a, calls),
     notes: a.notes,
   };
@@ -331,6 +341,8 @@ function findingsFor(
     cost: eqCost(output.reasoning),
     shareOfSession: output.reasoning / grandTotal,
     severity: output.reasoning / grandTotal > 0.05 ? 'high' : 'note',
+    // A property of the whole session's output, not of any one call.
+    spans: [],
   });
 
   // WHAT THE PAGE COULD NOT ACCOUNT FOR. Stated for every session, at zero as well as
@@ -365,6 +377,9 @@ function findingsFor(
     cost: eqCost(pricing.unpricedSpend),
     shareOfSession: unpricedShare,
     severity: unpricedShare > 0.05 || uncalibratedShare > 0.05 ? 'high' : 'note',
+    // Spread across whichever calls ran an unpriced model — a set this finding states in
+    // prose and does not carry, so it names no span rather than naming an arbitrary one.
+    spans: [],
   });
 
   for (const e of a.residency.epochs.slice(1)) {
@@ -384,6 +399,9 @@ function findingsFor(
       cost: eqCost(penalty),
       shareOfSession: penalty / grandTotal,
       severity: penalty / grandTotal > 0.05 ? 'high' : 'medium',
+      // The call that opened the epoch — the one whose prefix missed. Both headlines
+      // already name it, so the link goes where the sentence points.
+      spans: [atCall(e.start)],
     });
   }
 
@@ -397,6 +415,10 @@ function findingsFor(
       cost: eqCost(tc.total),
       shareOfSession: tc.total / grandTotal,
       severity: tc.total / grandTotal > 0.05 ? 'high' : 'medium',
+      // Where the result first became resident. The tool span itself would be the more
+      // exact target, but this finding is reached from an `Arrival`, which carries the
+      // call it landed at and not the `tool_use` id the tree keys tool spans on.
+      spans: [atCall(tc.bornAtCall)],
     });
   }
 
@@ -408,6 +430,9 @@ function findingsFor(
       cost: eqCost(spawnedOnly.input),
       shareOfSession: spawnedOnly.input / grandTotal,
       severity: 'note',
+      // About every spawn at once. Jaeger's own tree is the better way in here: the
+      // session link below opens it with the subagents already nested.
+      spans: [],
     });
   }
 
@@ -419,6 +444,12 @@ function findingsFor(
     cost: eqCost(startup),
     shareOfSession: startup / grandTotal,
     severity: 'note',
+    // Anchored on the call that actually exists rather than on the literal 0. A root
+    // conversation with no calls at all is a real state — `Conservation.rootCalls`
+    // exists to narrate it — and `call:0` would hash to a well-formed span id for a
+    // span nothing ever emitted, i.e. a link into an empty trace. Absence of a call
+    // renders no link, through the same path that renders one. [LAW:no-silent-failure]
+    spans: first ? [atCall(first.index)] : [],
   });
 
   return findings.sort((x, y) => y.shareOfSession - x.shareOfSession);
@@ -499,19 +530,6 @@ function dominantSource(byTokens: Map<StratumSource, number> | undefined): {
   return top && total > 0
     ? { source: top[0], share: top[1] / total }
     : { source: 'unattributed', share: 0 };
-}
-
-function flameOf(s: Span): FlameNode {
-  const u = rollup(s);
-  const agent = s.lineage[s.lineage.length - 1];
-  return {
-    name: (agent ? `${agent.agentType} · ` : '') + s.label,
-    value: Math.max(1, Math.round(spend(u))),
-    kind: s.detail.kind,
-    activity: s.detail.kind === 'call' ? s.detail.label.activity : null,
-    depth: depthOf(s.lineage),
-    children: s.children.map(flameOf),
-  };
 }
 
 /** One line telling a person scanning a list what this session was.

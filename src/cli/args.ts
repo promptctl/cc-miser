@@ -13,6 +13,7 @@
 // throws with the usage text attached.
 
 import { byProject, since as modifiedSince, type SessionSource } from '../discover.ts';
+import { DEFAULT_JAEGER } from '../jaeger.ts';
 
 /** A scope narrowing, carrying its own description.
  *
@@ -56,7 +57,7 @@ export type Command =
   | { kind: 'list'; scope: Scope }
   | { kind: 'trace'; scope: Scope }
   | { kind: 'otlp'; scope: Scope; endpoint: string }
-  | { kind: 'report'; scope: Scope; out: string; renderLimit: number };
+  | { kind: 'report'; scope: Scope; out: string; renderLimit: number; jaeger: string };
 
 /** Where `report` writes when nobody says: `./out`, resolved against the CURRENT
  * DIRECTORY.
@@ -144,9 +145,17 @@ interface Draft {
   limit: number | null;
   out: string | null;
   endpoint: string | null;
+  jaeger: string | null;
 }
 
-const EMPTY: Draft = { projects: null, filters: [], limit: null, out: null, endpoint: null };
+const EMPTY: Draft = {
+  projects: null,
+  filters: [],
+  limit: null,
+  out: null,
+  endpoint: null,
+  jaeger: null,
+};
 
 const withFilter = (d: Draft, f: Filter): Draft => ({ ...d, filters: [...d.filters, f] });
 
@@ -219,6 +228,14 @@ const FLAGS: Record<string, FlagSpec> = {
     ],
     read: (v) => (d) => ({ ...d, endpoint: v }),
   },
+  '--jaeger': {
+    placeholder: '<url>',
+    help: [
+      "the Jaeger the report's span links point at (report only)",
+      `default: ${DEFAULT_JAEGER}, the port telemetry/stack.sh publishes`,
+    ],
+    read: (v) => (d) => ({ ...d, jaeger: v }),
+  },
 };
 
 const SCOPE_FLAGS = ['--projects', '--project', '--session', '--since', '--limit'] as const;
@@ -269,13 +286,16 @@ const COMMANDS: Record<Command['kind'], CommandSpec> = {
       '--limit caps what is RENDERED, and applies after report has',
       'narrowed again (sessions with spawned conversations first, then',
       'at most two per project) — so it is not the N most recent.',
+      'Span links are computed, not fetched: report never contacts',
+      '--jaeger, so they resolve for sessions otlp has already sent.',
     ],
-    accepts: [...SCOPE_FLAGS, '--out'],
+    accepts: [...SCOPE_FLAGS, '--out', '--jaeger'],
     build: (d, scope) => ({
       kind: 'report',
       scope: { ...scope, limit: null },
       out: d.out ?? DEFAULT_OUT,
       renderLimit: d.limit ?? DEFAULT_RENDER_LIMIT,
+      jaeger: d.jaeger ?? DEFAULT_JAEGER,
     }),
   },
 };

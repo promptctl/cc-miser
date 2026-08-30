@@ -23,7 +23,6 @@ import type {
   Cost,
   Coverage,
   Finding,
-  FlameNode,
   Ledger,
   OutputTotals,
   PriceTotals,
@@ -32,6 +31,7 @@ import type {
   Stratum,
 } from './model.ts';
 import { workspaceKey } from '../workspace.ts';
+import { DOMAINS, DOMAIN_KEYS, spanUrl, traceUrl } from '../jaeger.ts';
 
 // ---------------------------------------------------------------------------
 // Formatting. A Cost renders WITH its projection; there is no path that prints a
@@ -117,8 +117,6 @@ const ACTIVITY_COLOR: Record<Activity, string> = {
   unclassified: '#B3AB9C',
 };
 
-const DEPTH_COLOR = ['#17150F', '#3E6B8A', '#8A5A2B', '#7A4E7E'];
-
 const SOURCE_COLOR: Record<Stratum['source'], string> = {
   startup: '#5A6675',
   toolResult: '#3E6B8A',
@@ -159,12 +157,29 @@ function ledgerBlock(l: Ledger): string {
   </section>`;
 }
 
-function findingBlock(f: Finding, i: number): string {
+/** One item of the punch list, with a way into the span it names.
+ *
+ * THE ANCHORS DECIDE THE LINKS, not a condition here. A finding about the whole session
+ * carries an empty `spans` and renders nothing; one that names a call renders one link —
+ * same expression, different data. [LAW:dataflow-not-control-flow]
+ *
+ * They point at the TOKEN domain because every row of this list is priced, and that is the
+ * trace whose span widths are spend: a reader arriving from "this cost 41,000 tok-eq" sees
+ * the call sized by what it cost rather than by how long it took. The wall-clock trace is
+ * one click away from there, and the panel below offers both. */
+function findingBlock(f: Finding, i: number, sessionId: string, jaeger: string): string {
+  const links = f.spans
+    .map(
+      (a) =>
+        `<a class="fi-span" href="${esc(spanUrl(jaeger, 'tokens', sessionId, a.nodeId))}">${esc(a.label)} in Jaeger</a>`,
+    )
+    .join('');
   return `<li class="finding sev-${f.severity}">
     <div class="fi-num">${String(i + 1).padStart(2, '0')}</div>
     <div class="fi-body">
       <h4>${esc(f.headline)}</h4>
       <p>${esc(f.detail)}</p>
+      ${links}
     </div>
     <div class="fi-cost">
       <div class="fi-val">${n(f.cost.value)}</div>
@@ -270,39 +285,43 @@ mostly ${st.source} (${pct(st.sourceShare)} of the characters that arrived here)
   </section>`;
 }
 
-/** Flamegraph as plain SVG — no library, so the page stays self-contained and the
- * palette matches the rest of the document. Colour is by activity, falling back to
- * spawn depth for non-call frames. */
-function flame(root: FlameNode): string {
-  const W = 1000;
-  const ROW = 19;
-  const rows: string[] = [];
-  let maxDepth = 0;
+/** Where the span tree went, and how to open it.
+ *
+ * THIS PANEL REPLACES A FLAMEGRAPH THIS FILE USED TO DRAW. Jaeger renders the waterfall,
+ * the flamegraph, span detail, search and trace comparison on these exact spans, and does
+ * all of it better than a few hundred lines of hand-rolled SVG did. So the tree is not
+ * drawn here at all — not behind a flag, not collapsed by default — and what stands in its
+ * place is the seam between the two tools.
+ *
+ * IT STATES ITS OWN PRECONDITION, which is the whole reason this is a paragraph and not a
+ * bare pair of links. Nothing on this page contacts Jaeger: the trace id is a digest over
+ * the session id, so it can be computed for a session that was never exported, and the
+ * link to one opens a trace view with nothing in it. An empty trace and a broken report
+ * look identical to a reader who was not told which is which — an answer-shaped void
+ * dressed as a hyperlink. [LAW:no-silent-failure] Saying `miser otlp` out loud is what
+ * turns "this is empty" from a bug report into an instruction. */
+function jaegerPanel(s: SessionReport, jaeger: string): string {
+  const links = DOMAIN_KEYS.map(
+    (key) =>
+      `<a class="jx" href="${esc(traceUrl(jaeger, key, s.sessionId))}">
+         <b>${esc(DOMAINS[key].label)}</b><span>${esc(DOMAINS[key].unit)}</span>
+       </a>`,
+  ).join('');
 
-  const walk = (node: FlameNode, x0: number, w: number, d: number): void => {
-    maxDepth = Math.max(maxDepth, d);
-    const colour = node.activity ? ACTIVITY_COLOR[node.activity] : DEPTH_COLOR[Math.min(node.depth, 3)]!;
-    const label = w > 60 ? esc(node.name.slice(0, Math.floor(w / 6.2))) : '';
-    rows.push(
-      `<g class="fr"><rect x="${x0.toFixed(1)}" y="${(d * ROW).toFixed(1)}" width="${Math.max(0.6, w - 0.7).toFixed(1)}" height="${ROW - 1.4}" fill="${colour}" opacity="${node.activity ? 0.88 : 0.7}"/>` +
-        (label ? `<text x="${(x0 + 4).toFixed(1)}" y="${(d * ROW + 13).toFixed(1)}" class="fl">${label}</text>` : '') +
-        `<title>${esc(node.name)} — ${n(node.value)} tok-eq</title></g>`,
-    );
-    let cx = x0;
-    const total = node.children.reduce((a, c) => a + c.value, 0) || 1;
-    for (const c of node.children) {
-      const cw = (c.value / node.value) * w * Math.min(1, node.value / total);
-      walk(c, cx, cw, d + 1);
-      cx += cw;
-    }
-  };
-  walk(root, 0, W, 0);
-
-  return `<section class="panel wide">
-    <h3>Where the tokens went</h3>
-    <p class="lede">The span tree weighted by cost, not time — width is spend. Colour is activity;
-      spawned conversations carry their spawner's label.</p>
-    <svg viewBox="0 0 ${W} ${(maxDepth + 1) * ROW}" class="flame" role="img" aria-label="cost-weighted flamegraph">${rows.join('')}</svg>
+  return `<section class="panel">
+    <h3>The span tree is in Jaeger</h3>
+    <p class="lede">This page no longer draws the tree. Jaeger already renders the waterfall,
+      the flamegraph, span detail and trace comparison over the same spans, so what stays here
+      is only what Jaeger cannot compute — the ledgers, the arena, and the findings above.</p>
+    <div class="jaeger">${links}</div>
+    <p class="cov-note">Both links carry the same ${s.calls.length} calls on different axes:
+      the wall-clock trace is drawn in real duration, the token trace draws every span's WIDTH
+      as its spend. Each opens <code>${esc(jaeger)}</code>, and resolves only for sessions
+      already sent there with <code>miser otlp</code> — nothing on this page contacts Jaeger,
+      so a session you have not exported opens an empty trace rather than an error. An export
+      is a snapshot: a transcript that has grown since its last one is priced here in full and
+      present there only up to the calls it had then, so a link to a recent call can land on
+      nothing until you export it again.</p>
   </section>`;
 }
 
@@ -590,7 +609,7 @@ function corpusSection(c: CorpusReport): string {
   </article>`;
 }
 
-function sessionSection(s: SessionReport, idx: number): string {
+function sessionSection(s: SessionReport, idx: number, jaeger: string): string {
   const wall = s.endedAt - s.startedAt;
   const cons = s.conservation;
   return `<article class="session" id="s-${idx}" data-panel="${idx}">
@@ -619,11 +638,13 @@ function sessionSection(s: SessionReport, idx: number): string {
     <section class="panel">
       <h3>Findings</h3>
       <p class="lede">Not a chart — a punch list. Each item names the thing, prices it, and says what it cost you.</p>
-      <ol class="findings">${s.findings.map(findingBlock).join('')}</ol>
+      <ol class="findings">${s.findings
+        .map((f, i) => findingBlock(f, i, s.sessionId, jaeger))
+        .join('')}</ol>
     </section>
 
     ${stratigraphy(s)}
-    ${flame(s.flame)}
+    ${jaegerPanel(s, jaeger)}
 
     <div class="ledgers">${s.ledgers.map(ledgerBlock).join('')}</div>
 
@@ -647,7 +668,15 @@ function sessionSection(s: SessionReport, idx: number): string {
 // Page
 // ---------------------------------------------------------------------------
 
-export function renderCorpus(c: CorpusReport): string {
+/** `jaeger` is where the reader's Jaeger is, as a base URL.
+ *
+ * A PARAMETER RATHER THAN A FIELD OF THE MODEL. The model is the seam between analysis and
+ * presentation, and every other thing on it is a fact about the corpus; where a viewer
+ * happens to be installed is a fact about this machine. Putting it on `CorpusReport` would
+ * also write it into `corpus.json`, which is the analysis published for other tools to
+ * read — an address baked into a data file goes stale the first time the stack moves.
+ * [LAW:decomposition] */
+export function renderCorpus(c: CorpusReport, jaeger: string): string {
   // The synopsis is what distinguishes two sessions of the same project — without it,
   // five entries all read "home-infra" and the rail is a list of indistinguishable rows.
   const index = c.sessions
@@ -764,19 +793,29 @@ body::before{
 .sev-medium .fi-val{color:var(--brass)}
 
 /* charts */
-.strat,.flame{width:100%; height:auto; display:block; background:var(--paper-2);
+.strat{width:100%; height:auto; display:block; background:var(--paper-2);
   border:1px solid var(--rule)}
 .grid{stroke:var(--rule-2); stroke-width:1}
 .axisline{stroke:var(--ink); stroke-width:1}
 .axis{font-family:var(--mono); font-size:9.5px; fill:var(--ink-3)}
 .cliff{stroke:var(--red); stroke-width:1.5; stroke-dasharray:3 2}
 .cliff-label{font-family:var(--mono); font-size:9.5px; fill:var(--red)}
-.fl{font-family:var(--mono); font-size:9.5px; fill:#F4F1E9; pointer-events:none}
-.fr rect{stroke:var(--paper); stroke-width:.6}
-.fr:hover rect{opacity:1; stroke:var(--ink); stroke-width:1}
 .legend{display:flex; gap:16px; flex-wrap:wrap; margin-top:9px}
 .key{font-size:10.5px; color:var(--ink-2); letter-spacing:.04em}
 .key i{display:inline-block; width:9px; height:9px; background:var(--c); margin-right:5px}
+
+/* out to Jaeger — the seam between what this page computes and what it delegates */
+.jaeger{display:flex; gap:14px; flex-wrap:wrap; margin:0 0 10px}
+.jx{display:block; flex:1 1 240px; padding:11px 14px; border:1px solid var(--rule);
+  background:var(--paper-2); text-decoration:none; color:var(--ink)}
+.jx:hover{border-color:var(--ink); background:var(--paper-3)}
+.jx b{display:block; font-family:var(--display); font-size:17px; font-weight:400}
+.jx b::after{content:" ↗"; color:var(--red); font-size:12px}
+.jx span{font-size:10.5px; color:var(--ink-3); font-family:var(--mono)}
+.fi-span{display:inline-block; margin-top:6px; font-family:var(--mono); font-size:11px;
+  color:var(--red); text-decoration:none; border-bottom:1px solid var(--rule)}
+.fi-span::after{content:" ↗"}
+.fi-span:hover{border-bottom-color:var(--red)}
 
 /* ledgers */
 .ledgers{display:grid; grid-template-columns:1fr 1fr; gap:34px 44px; margin-bottom:34px}
@@ -858,7 +897,9 @@ table.calib .below{color:var(--red)}
     <h2>Sessions by cost</h2>
     <ul>${index}</ul>
   </nav>
-  <main class="main">${corpusSection(c)}${c.sessions.map(sessionSection).join('')}</main>
+  <main class="main">${corpusSection(c)}${c.sessions
+    .map((s, i) => sessionSection(s, i, jaeger))
+    .join('')}</main>
 </div>
 <script>
 // Panels are addressed by KEY, not by position. An earlier version matched the nth
