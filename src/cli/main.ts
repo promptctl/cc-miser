@@ -38,7 +38,7 @@ import { analyzeSession, naming, type ReadText } from '../session.ts';
 import { applyScope, readArgs, USAGE, type Command, type Scope } from './args.ts';
 import { listRow, toTsv } from './list.ts';
 import { traceFile } from './trace.ts';
-import { exportSession, toExportTsv, type ExportRow } from './otlp.ts';
+import { exportHeader, exportRow, exportSession } from './otlp.ts';
 import { analyzeAll, buildCorpus, calibrate, select } from '../report/generate.ts';
 import { renderCorpus } from '../report/render.ts';
 import type { Selection } from '../report/model.ts';
@@ -101,6 +101,40 @@ export interface PostResult {
 }
 
 export type Post = (url: string, json: string) => Promise<PostResult>;
+
+/** What a collector rejected while answering 200.
+ *
+ * OTLP/HTTP's `ExportTraceServiceResponse` carries `partialSuccess` for exactly this: the
+ * request was accepted and some spans inside it were not, because an attribute was
+ * malformed or a limit was hit. The status is 200 either way.
+ *
+ * [LAW:no-silent-failure] Read rather than merely available. `PostResult.body` exists to
+ * carry this and, until this function, nothing looked at it — so a partially-rejected
+ * export printed a trace id and exited OK, and the person who followed that id to Jaeger
+ * found a trace quietly missing spans with nothing pointing back here.
+ *
+ * A body that is not JSON, or carries no `partialSuccess`, means nothing was rejected.
+ * That is not a fallback: a collector reporting a rejection has one documented way to say
+ * so, and its absence is the collector saying nothing was dropped. */
+export function rejection(body: string): string | null {
+  const parsed: unknown = ((): unknown => {
+    try {
+      return JSON.parse(body);
+    } catch {
+      return null;
+    }
+  })();
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const partial: unknown = (parsed as Record<string, unknown>)['partialSuccess'];
+  if (typeof partial !== 'object' || partial === null) return null;
+  const { rejectedSpans, errorMessage } = partial as Record<string, unknown>;
+  // The count crosses OTLP/JSON as a string, like every other int64 on this wire.
+  const rejected = Number(rejectedSpans ?? 0);
+  if (!Number.isFinite(rejected) || rejected === 0) return null;
+  return `${rejected} spans rejected${
+    typeof errorMessage === 'string' && errorMessage !== '' ? `: ${errorMessage}` : ''
+  }`;
+}
 
 /** Discover, then narrow — the spine every command shares.
  *
@@ -177,28 +211,48 @@ export async function run(command: Command, rt: Runtime): Promise<number> {
       // one every other renderer in this project is a view of. [LAW:one-source-of-truth]
       const file = traceFile(analyzed, root, criteria, now);
 
-      const rows: ExportRow[] = [];
+      // The header goes out before the first POST, so stdout is a RUNNING RECORD of what
+      // reached the collector rather than a report issued only if the whole scope
+      // succeeded. Batched until the end, a failure on session N discarded the trace ids
+      // of sessions 1..N-1 that had already landed — the run said "this failed" and left
+      // no record of the traces that are sitting in Jaeger right now. Those are different
+      // facts and the batching collapsed them. [LAW:no-silent-failure]
+      streams.out(`${exportHeader()}\n`);
+
+      let traces = 0;
+      let spans = 0;
       for (const session of file.sessions) {
-        const { request, rows: made } = exportSession(session);
+        const { request, rows } = exportSession(session);
         const { status, body } = await rt.post(command.endpoint, JSON.stringify(request));
+
         // [LAW:no-silent-failure] Checked after every call, before anything downstream
         // treats the export as done. A collector that refuses a session and a collector
-        // that stored it both leave this loop having "sent" it; only the status tells
-        // them apart, and a run that printed trace ids for spans Jaeger never received
-        // would send its reader to an empty page with no reason to doubt the tool.
+        // that stored it both leave this loop having "sent" it, and a run that printed
+        // trace ids for spans Jaeger never received would send its reader to an empty page
+        // with no reason to doubt the tool.
         if (status < 200 || status >= 300)
           throw new Error(
             `${command.endpoint} rejected session ${session.session}: HTTP ${status} ${body}`,
           );
-        rows.push(...made);
+        // A 200 is not the same as "all of it arrived". `rejection` reads what the status
+        // cannot say; treated as success, a partially-stored session would print a trace
+        // id for a trace quietly missing spans.
+        const rejected = rejection(body);
+        if (rejected !== null)
+          throw new Error(
+            `${command.endpoint} accepted session ${session.session} only in part: ${rejected}`,
+          );
+
+        // Written as it lands, header already out, so the rows on stdout are exactly the
+        // sessions the collector took — including on the run that later throws.
+        for (const r of rows) streams.out(`${exportRow(r)}\n`);
+        traces += rows.length;
+        spans += rows.reduce((a, r) => a + r.spans, 0);
         streams.err('.');
       }
       streams.err('\n');
-
-      streams.out(`${toExportTsv(rows)}\n`);
-      const spans = rows.reduce((a, r) => a + r.spans, 0);
       streams.err(
-        `${file.sessions.length} sessions · ${rows.length} traces · ${spans} spans -> ${command.endpoint}\n`,
+        `${file.sessions.length} sessions · ${traces} traces · ${spans} spans -> ${command.endpoint}\n`,
       );
       return EXIT.OK;
     }

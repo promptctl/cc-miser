@@ -37,7 +37,7 @@ import { depthDisagreements, resolveForest, type Candidate } from '../src/forest
 import { depthOf, lineagePath } from '../src/lineage.ts';
 import { parseTranscript } from '../src/records.ts';
 import { analyzeSession } from '../src/session.ts';
-import { allCalls, atDepth, rollup, rollupWhere, type Span } from '../src/spans.ts';
+import { allCalls, atDepth, billableOf, rollup, rollupWhere, type Span } from '../src/spans.ts';
 
 // ---------------------------------------------------------------------------------
 // THE SCENARIO, WRITTEN DOWN BEFORE THE TRANSCRIPT
@@ -817,5 +817,118 @@ describe('resolveForest is a pure function of what it is handed', () => {
     const conv = buildConversation(parseTranscript(fixture.read(fixture.source.path)).lines);
     const empty = resolveForest(conv, [] as Candidate[]);
     expect(empty).toEqual({ placed: [], orphans: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------------
+// A CHILD THAT BEGINS BEFORE ITS PARENT
+// ---------------------------------------------------------------------------------
+//
+// `NESTED` above cannot exercise this: every one of its spawns starts strictly after the
+// call that spawned it, so the `Math.min` that widens a call's `tStart` never actually has
+// to lower one. On the real corpus 24 sessions do — a slash-command fork is attributed to
+// the call nearest it in time, and a subagent transcript's first line can precede that
+// call — and the fix for it is the reason `SpanDetail`'s call variant carries its own `ts`.
+//
+// Two assertions, because the fix has two halves and only one of them is obvious. The
+// extent must widen, or the child escapes its parent and any viewer that reads timestamps
+// renders a malformed tree. And the BILLABLE INSTANT must not move with it: collapsing
+// `detail.ts` back to `s.tStart` looks like a harmless simplification, the two agree on
+// almost every session in the corpus, and the sessions where they disagree are exactly the
+// ones that would get priced at whatever rate card the subagent's start date fell under.
+
+/** A spawn whose transcript opens before the call it is attributed to. `startMinute: 0`
+ * puts it at the very beginning of the session, while the `Agent` call that spawns it sits
+ * several turns in. */
+const EARLY: SessionSpec = {
+  sessionId: 'ea111111-2222-3333-4444-555555555555',
+  project: FOREIGN_SLUG,
+  cwd: FOREIGN_CWD,
+  model: 'claude-opus-5',
+  root: [
+    userSays('start'),
+    assistantTurn({
+      thinking: '',
+      text: 'Looking around first.',
+      tools: [{ id: 'toolu_look', name: 'Grep', input: { pattern: 'x' }, result: 'hit\n' }],
+      attachments: [],
+      usage: { input: 10, cacheCreation: 1000, cacheRead: 0, output: 100 },
+    }),
+    userSays('now delegate'),
+    assistantTurn({
+      thinking: '',
+      text: 'Handing off.',
+      tools: [
+        {
+          id: 'toolu_late',
+          name: 'Agent',
+          input: { subagent_type: 'Explore', description: 'the early one' },
+          result: 'ok',
+        },
+      ],
+      attachments: [],
+      usage: { input: 5, cacheCreation: 500, cacheRead: 200, output: 80 },
+    }),
+  ],
+  spawns: [
+    {
+      agentId: 'a_early',
+      agentType: 'Explore',
+      description: 'the early one',
+      toolUseId: 'toolu_late',
+      declaredDepth: 1,
+      startMinute: 0,
+      events: [
+        userSays('go'),
+        assistantTurn({
+          thinking: '',
+          text: 'done',
+          tools: [],
+          attachments: [],
+          usage: { input: 1, cacheCreation: 10, cacheRead: 0, output: 5 },
+        }),
+      ],
+    },
+  ],
+};
+
+describe('a call whose child began before it', () => {
+  const early = buildSession(EARLY);
+  const a = analyzeSession(early.source, early.read);
+  /** The call carrying the `Agent` tool_use — the one the early conversation grafts onto.
+   * Selected by the subagent hanging beneath it, not merely by having a tool: call 0 has a
+   * `Grep`, and picking the first call with any tool child selected the wrong one. */
+  const spawnCall = allCalls(a.tree).find((s) =>
+    s.children.some((k) => k.children.some((g) => g.detail.kind === 'subagent')),
+  )!;
+  const ownTs = a.conversation.calls[spawnCall.callFirst]!.ts;
+
+  test('the fixture really does put the child first, or it proves nothing', () => {
+    // Asserted rather than assumed: if `startMinute` stopped meaning what it means, this
+    // whole block would keep passing while testing the ordinary case.
+    const child = spawnCall.children.flatMap((k) => k.children).find((k) => k.detail.kind === 'subagent')!;
+    expect(child).toBeDefined();
+    expect(child.tStart).toBeLessThan(ownTs);
+  });
+
+  test('the call span widens to cover the child, rather than letting it escape', () => {
+    expect(spawnCall.tStart).toBeLessThan(ownTs);
+    for (const kid of spawnCall.children) {
+      expect(kid.tStart).toBeGreaterThanOrEqual(spawnCall.tStart);
+      expect(kid.tEnd).toBeLessThanOrEqual(spawnCall.tEnd);
+    }
+  });
+
+  test('the billable instant does not move with the extent', () => {
+    // The half that has no visible symptom. `tStart` is now earlier than the call ever
+    // happened; the instant a rate card applies at is still the call's own.
+    expect(spawnCall.detail.ts).toBe(ownTs);
+    expect(billableOf(spawnCall).ts).toBe(ownTs);
+    expect(billableOf(spawnCall).ts).not.toBe(spawnCall.tStart);
+  });
+
+  test('every call in the session is priced at its own instant', () => {
+    for (const s of allCalls(a.tree))
+      expect(billableOf(s).ts).toBe(s.detail.ts);
   });
 });

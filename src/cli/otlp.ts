@@ -35,7 +35,7 @@
 import { createHash } from 'node:crypto';
 import { spend } from '../tokens.ts';
 import { SCHEMA, type TraceNode, type TraceSession } from './trace.ts';
-import { tsv } from './tsv.ts';
+import { header, row } from './tsv.ts';
 
 // ─── The wire shape ────────────────────────────────────────────────────────────────
 
@@ -458,7 +458,7 @@ function domainExport(
         scopeSpans: [
           {
             scope: { name: 'cc-miser', version: SCHEMA },
-            spans: flatten(session.tree, domain.layout(session.tree), traceId, undefined, spanIdOf),
+            spans,
           },
         ],
     },
@@ -506,4 +506,7 @@ export const EXPORT_COLUMNS = [
   'spans',
 ] as const satisfies readonly (keyof ExportRow)[];
 
-export const toExportTsv = (rows: readonly ExportRow[]): string => tsv(EXPORT_COLUMNS, rows);
+// `otlp`'s binding of the shared renderer, in both the forms the driver needs: the header
+// once, then a row per session as its export lands.
+export const exportHeader = (): string => header(EXPORT_COLUMNS);
+export const exportRow = (r: ExportRow): string => row(EXPORT_COLUMNS, r);

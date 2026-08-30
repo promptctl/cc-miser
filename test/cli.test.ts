@@ -20,12 +20,14 @@ import {
   DEFAULT_OUT,
   DEFAULT_RENDER_LIMIT,
   USAGE,
+  DEFAULT_ENDPOINT,
   applyScope,
   commandsAccepting,
   readArgs,
   type Scope,
 } from '../src/cli/args.ts';
 import { COLUMNS, listRow, toTsv, type ListRow } from '../src/cli/list.ts';
+import { EXPORT_COLUMNS } from '../src/cli/otlp.ts';
 import { EXIT, main, run, type Streams } from '../src/cli/main.ts';
 import { SCHEMA, traceFile, traceNode } from '../src/cli/trace.ts';
 import type { SessionSource } from '../src/discover.ts';
@@ -393,7 +395,16 @@ function materialize(root: string, f: SessionFixture): void {
 }
 
 /** A corpus of two projects, on disk, and a runtime that captures both streams. */
-function corpus(): { root: string; rt: () => { rt: Runtime; out: () => string; err: () => string } } {
+function corpus(): {
+  root: string;
+  rt: () => {
+    rt: Runtime;
+    out: () => string;
+    err: () => string;
+    /** Every OTLP request the run made, captured instead of sent. */
+    posts: () => readonly { url: string; json: string }[];
+  };
+} {
   const root = mkdtempSync(join(tmpdir(), 'cc-miser-cli-'));
   materialize(root, buildSession(SPEC));
   materialize(
@@ -478,6 +489,93 @@ describe('a command run end to end keeps its two streams apart', () => {
     expect(doc.schema).toBe(SCHEMA);
     expect(doc.sessions).toHaveLength(2);
     expect(doc.projectsRoot).toBe(root);
+  });
+
+  test('otlp posts every in-scope session and names its traces on stdout', async () => {
+    const t = rt();
+    expect(await run(readArgs(['otlp', '--projects', root]), t.rt)).toBe(EXIT.OK);
+
+    // Two fixture sessions, two domains each. Read off the posted BODIES rather than off
+    // the exporter, so this covers the wiring — that the driver posts what it printed.
+    expect(t.posts()).toHaveLength(2);
+    for (const p of t.posts()) {
+      expect(p.url).toBe(DEFAULT_ENDPOINT);
+      expect(JSON.parse(p.json).resourceSpans).toHaveLength(2);
+    }
+
+    const lines = t.out().trimEnd().split('\n');
+    expect(lines[0]).toBe(EXPORT_COLUMNS.join('\t'));
+    expect(lines).toHaveLength(5);
+    for (const line of lines.slice(1))
+      expect(line.split('\t')).toHaveLength(EXPORT_COLUMNS.length);
+    expect(t.err()).toContain(`-> ${DEFAULT_ENDPOINT}`);
+  });
+
+  test('otlp posts where --endpoint says, not where the default says', async () => {
+    const t = rt();
+    const elsewhere = 'http://example.invalid:4318/v1/traces';
+    expect(await run(readArgs(['otlp', '--projects', root, '--endpoint', elsewhere]), t.rt)).toBe(
+      EXIT.OK,
+    );
+    expect(t.posts().map((p) => p.url)).toEqual([elsewhere, elsewhere]);
+  });
+
+  test('a collector that refuses a session fails the run and names it', async () => {
+    const t = rt();
+    const refusing = { ...t.rt, post: async () => ({ status: 503, body: 'collector down' }) };
+    expect(await main(['otlp', '--projects', root], refusing)).toBe(EXIT.FAILED);
+    expect(t.err()).toContain('503');
+    // The session is named, because "the export failed" without which one is a report
+    // nobody can act on.
+    expect(t.err()).toMatch(/rejected session [0-9a-f]{8}/);
+  });
+
+  test('a collector that stores only part of a session is a failure, not a success', async () => {
+    // OTLP/HTTP answers 200 and reports what it dropped in the body. Read only the status,
+    // this prints a trace id and exits OK for a trace quietly missing spans — and the
+    // person who follows that id finds a short trace with nothing pointing back here.
+    const t = rt();
+    const partial = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({ partialSuccess: { rejectedSpans: '3', errorMessage: 'too big' } }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], partial)).toBe(EXIT.FAILED);
+    expect(t.err()).toContain('3 spans rejected');
+    expect(t.err()).toContain('too big');
+  });
+
+  test('an ordinary 200 is not read as a partial rejection', async () => {
+    // The other direction, so the check above cannot pass by failing everything: a
+    // collector that stored the lot answers `{}` or `{"partialSuccess":{}}`.
+    for (const body of ['{}', '{"partialSuccess":{}}', '', 'not json at all']) {
+      const t = rt();
+      const ok = { ...t.rt, post: async () => ({ status: 200, body }) };
+      expect(await main(['otlp', '--projects', root], ok)).toBe(EXIT.OK);
+    }
+  });
+
+  test('sessions that landed before a failure still reach stdout', async () => {
+    // The failure this guards: rows batched until the end are lost entirely when a later
+    // session throws, so a run that posted three sessions and failed on the fourth leaves
+    // no record of the three traces now sitting in Jaeger.
+    const t = rt();
+    let n = 0;
+    const failsOnSecond = {
+      ...t.rt,
+      post: async (url: string, json: string) => {
+        n += 1;
+        t.rt.post(url, json);
+        return n === 1 ? { status: 200, body: '{}' } : { status: 500, body: 'nope' };
+      },
+    };
+    expect(await main(['otlp', '--projects', root], failsOnSecond)).toBe(EXIT.FAILED);
+    const lines = t.out().trimEnd().split('\n');
+    expect(lines[0]).toBe(EXPORT_COLUMNS.join('\t'));
+    // The first session's two domains, and nothing for the one that failed.
+    expect(lines).toHaveLength(3);
   });
 
   test('report writes its files and names them on stdout', async () => {

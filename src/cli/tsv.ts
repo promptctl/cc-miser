@@ -37,8 +37,22 @@ const cell = (v: string | number): string => String(v).replace(/[\t\r\n]/g, ' ')
  * this", which would let `columns` name a column that does not exist and render it as
  * `undefined`. The mapped form says only what is true: every field this row HAS is
  * printable. */
+export const header = (columns: readonly string[]): string => columns.join('\t');
+
+export const row = <R extends { [K in keyof R]: string | number }>(
+  columns: readonly (keyof R & string)[],
+  r: R,
+): string => columns.map((c) => cell(r[c])).join('\t');
+
+/** The whole table at once, for a caller that has every row before it writes any.
+ *
+ * Defined in terms of the two above rather than beside them, so a caller that must stream
+ * — `otlp` writes each row as its POST lands, because a batched table is lost entirely if
+ * a later session fails — emits exactly the same bytes as one that does not.
+ * [LAW:one-source-of-truth] The alternative was the streaming caller rendering a table and
+ * slicing the header line back off with `split('\n').slice(1)`, which is this module's job
+ * being done badly by someone who could not ask for half of it. */
 export const tsv = <R extends { [K in keyof R]: string | number }>(
   columns: readonly (keyof R & string)[],
   rows: readonly R[],
-): string =>
-  [columns.join('\t'), ...rows.map((r) => columns.map((c) => cell(r[c])).join('\t'))].join('\n');
+): string => [header(columns), ...rows.map((r) => row(columns, r))].join('\n');

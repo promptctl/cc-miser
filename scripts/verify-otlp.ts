@@ -203,6 +203,22 @@ for (const domain of DOMAINS) {
   );
   check(dangling.length === 0, 'every parent reference resolves inside the trace', `${dangling.length} dangling`);
 
+  // Everything below needs THE root, and a rootless trace is exactly the malformed shape
+  // this script exists to catch. Reading `roots[0]!` anyway turned that finding into a
+  // TypeError that killed the run — so the one input worth reporting in full detail was
+  // the one input that produced no report at all, against this file's own promise to
+  // collect every failure rather than throw on the first. The failed check above is
+  // already recorded; this stops, it does not swallow. [LAW:no-silent-failure]
+  //
+  // The root is BOUND here rather than asserted with `!` further down: the check and the
+  // value come from one expression, so there is no second place that could be right about
+  // the count and wrong about the span.
+  const rootSpan = roots.length === 1 ? roots[0] : undefined;
+  if (rootSpan === undefined) {
+    console.log('  --   remaining checks skipped for this domain: no single root to walk from\n');
+    continue;
+  }
+
   // WHERE A SUBAGENT MAY LEGALLY HANG, enumerated rather than assumed. This check first
   // asserted the one shape everybody pictures — a subagent under the `claude_code.tool`
   // span that spawned it — and a real session failed it with 1 of 11 misparented. The
@@ -225,14 +241,21 @@ for (const domain of DOMAINS) {
   const routes = [...new Set(parents)]
     .map((p) => `${parents.filter((q) => q === p).length}× ${p} (${LEGAL_PARENTS[p ?? ''] ?? 'ILLEGAL'})`)
     .join(', ');
-  check(
-    subagents.length > 0 && stray.length === 0,
-    'every subagent nests under the span that spawned it',
-    `${subagents.length} subagents — ${routes}`,
-  );
+  // A session with no spawns at all is an ordinary session, not a broken export — the
+  // same kind of fact as a dimension this session does not carry, and it belongs in the
+  // same bucket. Folded into `check`, `subagents.length > 0` made every plain
+  // conversation report a false failure; folded in as a pass, a green run would claim it
+  // had checked nesting when there was no nesting to check.
+  if (subagents.length === 0)
+    skip('every subagent nests under the span that spawned it', 'this session spawned none');
+  else
+    check(
+      stray.length === 0,
+      'every subagent nests under the span that spawned it',
+      `${subagents.length} subagents — ${routes}`,
+    );
 
   // THE TOTAL — the ticket's third condition, as an equality against the report.
-  const rootSpan = roots[0]!;
   const inJaeger = tagOf(trace, rootSpan, 'cc_miser.rollup.tok_eq');
   check(
     inJaeger === String(expected.tokEq),
