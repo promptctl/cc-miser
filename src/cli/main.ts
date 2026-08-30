@@ -107,13 +107,26 @@ export interface PostResult {
 
 export type Post = (url: string, json: string) => Promise<PostResult>;
 
-/** What a collector rejected while answering 200.
+/** What a collector said while answering 200 — all three of the things it can say.
  *
- * OTLP/HTTP's `ExportTraceServiceResponse` carries `partialSuccess` for exactly this: the
- * request was accepted and some spans inside it were not, because an attribute was
- * malformed or a limit was hit. The status is 200 either way.
+ * [LAW:types-are-the-program] THREE states, because the collector has three. It stored
+ * everything; it stored everything and wants to tell you something; it refused some spans.
+ * OTLP's `ExportTracePartialSuccess` documents `error_message` for both of the last two —
+ * "to explain why the server rejected parts of the data during a partial success OR to
+ * convey warnings/suggestions during a full success" — so a 200 with `rejected_spans: 0`
+ * and a message is an ordinary case and not a contradiction.
  *
- * [LAW:no-silent-failure] Read rather than merely available. `PostResult.body` exists to
+ * Returned as `string | null` there were only two slots, and the warning had to be miscast
+ * into one of them: as `null` it vanished, which is the answer-shaped void this function
+ * exists to prevent, and as a non-null string it would have failed a run whose export
+ * succeeded. Neither is a check that was forgotten — both are what a two-state type does to
+ * a three-state fact. Widening the type is what deletes the question. */
+export type CollectorSaid =
+  | { kind: 'stored' }
+  | { kind: 'warned'; message: string }
+  | { kind: 'rejected'; message: string };
+
+/** [LAW:no-silent-failure] Read rather than merely available. `PostResult.body` exists to
  * carry this and, until this function, nothing looked at it — so a partially-rejected
  * export printed a trace id and exited OK, and the person who followed that id to Jaeger
  * found a trace quietly missing spans with nothing pointing back here.
@@ -121,7 +134,7 @@ export type Post = (url: string, json: string) => Promise<PostResult>;
  * A body that is not JSON, or carries no `partialSuccess`, means nothing was rejected.
  * That is not a fallback: a collector reporting a rejection has one documented way to say
  * so, and its absence is the collector saying nothing was dropped. */
-export function rejection(body: string): string | null {
+export function collectorSaid(body: string): CollectorSaid {
   const parsed: unknown = ((): unknown => {
     try {
       return JSON.parse(body);
@@ -129,16 +142,21 @@ export function rejection(body: string): string | null {
       return null;
     }
   })();
-  if (typeof parsed !== 'object' || parsed === null) return null;
+  if (typeof parsed !== 'object' || parsed === null) return { kind: 'stored' };
   const partial: unknown = (parsed as Record<string, unknown>)['partialSuccess'];
-  if (typeof partial !== 'object' || partial === null) return null;
+  if (typeof partial !== 'object' || partial === null) return { kind: 'stored' };
   const { rejectedSpans, errorMessage } = partial as Record<string, unknown>;
   // The count crosses OTLP/JSON as a string, like every other int64 on this wire.
   const rejected = Number(rejectedSpans ?? 0);
-  if (!Number.isFinite(rejected) || rejected === 0) return null;
-  return `${rejected} spans rejected${
-    typeof errorMessage === 'string' && errorMessage !== '' ? `: ${errorMessage}` : ''
-  }`;
+  const note = typeof errorMessage === 'string' && errorMessage !== '' ? errorMessage : '';
+  if (!Number.isFinite(rejected) || rejected === 0)
+    // Nothing dropped. The message, if there is one, is the collector's full-success
+    // warning — the run continues and the reader still gets to see it.
+    return note === '' ? { kind: 'stored' } : { kind: 'warned', message: note };
+  return {
+    kind: 'rejected',
+    message: `${rejected} spans rejected${note === '' ? '' : `: ${note}`}`,
+  };
 }
 
 /** Discover, then narrow — the spine every command shares.
@@ -239,13 +257,19 @@ export async function run(command: Command, rt: Runtime): Promise<number> {
           throw new Error(
             `${command.endpoint} rejected session ${session.session}: HTTP ${status} ${body}`,
           );
-        // A 200 is not the same as "all of it arrived". `rejection` reads what the status
-        // cannot say; treated as success, a partially-stored session would print a trace
-        // id for a trace quietly missing spans.
-        const rejected = rejection(body);
-        if (rejected !== null)
+        // A 200 is not the same as "all of it arrived". `collectorSaid` reads what the
+        // status cannot say; treated as success, a partially-stored session would print a
+        // trace id for a trace quietly missing spans. A warning is NOT that case — the
+        // export landed whole — so it goes to stderr beside the progress dots and the run
+        // carries on. [LAW:no-silent-failure] the collector spoke; something says so.
+        const said = collectorSaid(body);
+        if (said.kind === 'rejected')
           throw new Error(
-            `${command.endpoint} accepted session ${session.session} only in part: ${rejected}`,
+            `${command.endpoint} accepted session ${session.session} only in part: ${said.message}`,
+          );
+        if (said.kind === 'warned')
+          streams.err(
+            `\n${command.endpoint} stored session ${session.session} with a warning: ${said.message}\n`,
           );
 
         // Written as it lands, header already out, so the rows on stdout are exactly the
@@ -359,17 +383,45 @@ export async function main(argv: readonly string[], rt: Runtime): Promise<number
   }
 }
 
+/** How long one session's export may take before the run gives up on the collector.
+ *
+ * Generous, because the bound exists to catch a collector that has STOPPED rather than one
+ * that is merely slow: a session posts as a single body, the corpus has sessions past a
+ * megabyte, and an endpoint across a slow link is doing nothing wrong. Thirty seconds is
+ * far past any healthy local collector and far short of forever, which is the only other
+ * value on offer. */
+const POST_TIMEOUT_MS = 30_000;
+
 /** The real post. [LAW:effects-at-boundaries] The only place in this project that opens a
  * socket, and it lives on the edge beside the file reader and the clock.
  *
  * A network error throws out of `fetch` and is caught by `main`'s handler as EXIT.FAILED
  * with the message attached — a collector that is not running should say so, not be
- * turned into a status code this function invented. [LAW:no-silent-failure] */
+ * turned into a status code this function invented. [LAW:no-silent-failure]
+ *
+ * THE BOUND, because "not running" is not the only way a collector fails. One that accepts
+ * the connection and then never answers leaves a bare `fetch` awaiting forever: no exit
+ * code, no stderr, no partial answer — the loudest failure design in this file defeated by
+ * a socket that simply goes quiet. That is not hypothetical for this backend; the retry
+ * budget in `scripts/verify-otlp.ts` exists because its memory store stalls part-way
+ * through bodies under load, measured on the read path. The write path gets a bound for
+ * the same reason.
+ *
+ * The abort is re-thrown NAMED. Bun raises a `TimeoutError` whose message is the bare
+ * "The operation timed out." — true, and useless: it names neither the endpoint it gave up
+ * on nor how long it waited, so a reader cannot tell a wedged collector from a wrong
+ * `--endpoint`. Trading an indefinite hang for an unactionable message is not the fix.
+ * [LAW:no-silent-failure] */
 const postJson: Post = async (url, json) => {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: json,
+    signal: AbortSignal.timeout(POST_TIMEOUT_MS),
+  }).catch((e: unknown) => {
+    if (e instanceof DOMException && e.name === 'TimeoutError')
+      throw new Error(`${url} did not answer within ${POST_TIMEOUT_MS / 1000}s`);
+    throw e;
   });
   return { status: res.status, body: await res.text() };
 };

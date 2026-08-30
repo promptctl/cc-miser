@@ -555,6 +555,28 @@ describe('a command run end to end keeps its two streams apart', () => {
     expect(t.err()).toContain('too big');
   });
 
+  test('a collector that stored everything and warned is heard, and still succeeds', async () => {
+    // OTLP documents `error_message` for warnings on a FULL success, not only for
+    // explaining a rejection, so `rejectedSpans: 0` with a message is an ordinary answer.
+    // Read through a two-state return it had nowhere to go: dropped as "nothing rejected",
+    // or promoted to a failure on an export that completely succeeded. Both are wrong, and
+    // this pins the third answer — the run survives AND the reader hears it.
+    const t = rt();
+    const warning = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({
+          partialSuccess: { rejectedSpans: '0', errorMessage: 'queue is nearly full' },
+        }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], warning)).toBe(EXIT.OK);
+    expect(t.err()).toContain('queue is nearly full');
+    // Named, so a warning on a multi-session run points at the session it is about.
+    expect(t.err()).toMatch(/stored session [0-9a-z-]+ with a warning/);
+  });
+
   test('an ordinary 200 is not read as a partial rejection', async () => {
     // The other direction, so the check above cannot pass by failing everything: a
     // collector that stored the lot answers `{}` or `{"partialSuccess":{}}`.
