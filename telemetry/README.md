@@ -41,11 +41,20 @@ machine, with an unrelated collector held up by a restart policy. cc-miser publi
 the containers the services still listen on the standard ports; only the host-side
 mapping moved. `telemetry/stack.sh` is the one place either set is written down.
 
-Run `verify` after every `up`, before trusting anything you see. It sends real spans
-through both published OTLP ports and then asks Jaeger's query API whether those exact
-spans arrived, so it catches the case where the transport succeeds and the data
-vanishes anyway. That is not hypothetical: it is how the previous Docker stack failed
-on 2026-08-26 — every port open, every connection accepted, nothing ever stored.
+Run `verify` after every `up`, before trusting anything you see. It checks two things,
+and can fail for either reason.
+
+It sends real spans through both published OTLP ports and then asks Jaeger's query API
+whether those exact spans arrived, so it catches the case where the transport succeeds and
+the data vanishes anyway. That is not hypothetical: it is how the previous Docker stack
+failed on 2026-08-26 — every port open, every connection accepted, nothing ever stored.
+
+Then it sends one span *twice* under the same id and confirms Jaeger stored it once. That
+is the property `miser otlp` relies on to re-export a session that grew (see below), and
+it is configuration rather than code — so a moved image or a retired environment variable
+could take it away with no symptom except wrong traces. A failure here reads `Jaeger kept
+2 spans where one span was sent twice under one id` and means the span store is appending;
+nothing is wrong with the transport.
 
 `telemetry/stack.sh` is the script behind all four commands, and it is worth reading
 once if you touch this stack. The part that surprises people: containers on this
@@ -165,11 +174,10 @@ domain and the span-tree node, so the same call exports to the same id every tim
 is what lets the second export land on top of the first instead of beside it. It is also
 what lets the HTML report link to a span it never exported.
 
-**Jaeger runs `badger` here, not the default memory store.** The memory store *appends* a
-re-sent span, so the trace accumulated both versions: two root spans, a doubled span count,
-and totals computed off a session that appeared twice. Badger replaces it. That is the
-whole reason `telemetry/stack.sh` sets `SPAN_STORAGE_TYPE`, and the comment there records
-the measurement.
+**Jaeger runs `badger` here, not the default memory store,** because that store replaces a
+re-sent span where the default accumulates both copies. That is the whole reason
+`telemetry/stack.sh` sets `SPAN_STORAGE_TYPE`; the measurement behind the choice is
+recorded there, and `bun run telemetry verify` re-checks it on the running container.
 
 The catch worth carrying: badger keys a span on `(traceId, startTime, spanId)`. A span
 re-sent with a *different* start time appends exactly like the memory store did. So the
