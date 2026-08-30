@@ -328,7 +328,13 @@ function detailAttrs(node: TraceNode): KeyValue[] {
         int('output_tokens', detail.usage.output),
         int('cache_read_tokens', detail.usage.cacheRead),
         int('cache_creation_tokens', detail.usage.cacheCreation),
-        int('cc_miser.tok_eq', Math.round(spend(detail.usage))),
+        // The SAME expression that sizes this span on the token axis, not a second one
+        // that agrees today. `cc_miser.tok_eq` is what the span reports and `ownTokens` is
+        // what the span is drawn as, so a drift between them is the axis lying rather than
+        // a stale number — and the width test's `widthTokens − tokEq <= spans.length` is a
+        // loose enough bound to absorb a small one without ever localising it.
+        // [LAW:one-source-of-truth]
+        int('cc_miser.tok_eq', ownTokens(node)),
         int('cc_miser.line_count', detail.lineCount),
         // Activity, its tier and its reason: the classification native export has no
         // concept of, and the dimension PROJECT.md's whole ledger pivots on. The tier
