@@ -53,7 +53,12 @@ import type { Selection } from '../report/model.ts';
  * apart processes an empty set believing it processed a corpus. */
 export const EXIT = {
   OK: 0,
-  /** The pipeline failed on real input. The message on stderr names the transcript. */
+  /** The pipeline failed on real input. The message on stderr names WHAT FAILED, which is
+   * the transcript when the failure is about a session's contents, and the endpoint and
+   * session when a collector refused an export the pipeline built correctly. Those are two
+   * failure classes under one code, and the second is not a weaker case of the first:
+   * naming a transcript there would point the reader at a file that is fine and send them
+   * to debug it. `otlp`'s exports are the path that has both. */
   FAILED: 1,
   /** The command line was wrong. Nothing was read, nothing was written. */
   USAGE: 2,
