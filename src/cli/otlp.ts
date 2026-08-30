@@ -495,9 +495,7 @@ export interface ExportRow {
   spans: number;
 }
 
-/** The column order, which IS the header line — `list`'s idiom, and the same renderer.
- * A test asserts this covers every field of `ExportRow`, so a field added to the row
- * cannot silently stop reaching stdout. */
+/** The column order, which IS the header line — `list`'s idiom, and the same renderer. */
 export const EXPORT_COLUMNS = [
   'session',
   'project',
@@ -505,6 +503,25 @@ export const EXPORT_COLUMNS = [
   'traceId',
   'spans',
 ] as const satisfies readonly (keyof ExportRow)[];
+
+/** Every field of `ExportRow` appears in `EXPORT_COLUMNS` — the direction `satisfies` does
+ * not check. `list.ts` proves this about `ListRow`; the identical situation deserves the
+ * identical proof.
+ *
+ * [LAW:types-are-the-program] `satisfies readonly (keyof ExportRow)[]` proves only that
+ * every column is a real field. Adding a field to `ExportRow` and forgetting the column
+ * would compile, and the field would silently never reach stdout — and a trace id that is
+ * absent from the output looks exactly like a session that produced no trace, which is the
+ * one thing this command exists to report.
+ *
+ * [LAW:single-enforcer] the runtime test in `test/otlp.test.ts` used to be the whole
+ * guarantee, which left one invariant enforced at two strengths across two modules — and
+ * the weaker of the two is where the drift lands. The test stays, because it asserts a
+ * different claim: that the values reach the rendered row, not merely that the keys are
+ * covered. This asserts the containment, so a missing column fails the build. */
+type MissingExportColumn = Exclude<keyof ExportRow, (typeof EXPORT_COLUMNS)[number]>;
+const _everyFieldIsAColumn: MissingExportColumn extends never ? true : MissingExportColumn =
+  true;
 
 // `otlp`'s binding of the shared renderer, in both the forms the driver needs: the header
 // once, then a row per session as its export lands.
