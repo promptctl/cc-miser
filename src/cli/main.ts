@@ -161,13 +161,13 @@ export function collectorSaid(body: string): CollectorSaid {
         note === '' ? '' : `: ${note}`
       }`,
     };
-  if (rejected === 0)
+  if (rejected.isZero)
     // Nothing dropped. The message, if there is one, is the collector's full-success
     // warning — the run continues and the reader still gets to see it.
     return note === '' ? { kind: 'stored' } : { kind: 'warned', message: note };
   return {
     kind: 'rejected',
-    message: `${rejected} spans rejected${note === '' ? '' : `: ${note}`}`,
+    message: `${rejected.text} spans rejected${note === '' ? '' : `: ${note}`}`,
   };
 }
 
@@ -176,18 +176,35 @@ export function collectorSaid(body: string): CollectorSaid {
  * was dropped.
  *
  * [LAW:parse-dont-validate] A SHAPE test, not `Number()`. Coercion answers for values that
- * are not counts at all and answers WRONG in both directions: `Number("")`, `Number(false)`,
- * `Number([])` and `Number(null)` are all 0, so a body carrying `"rejectedSpans": ""` beside
+ * are not counts at all, and answers WRONG in both directions: `Number("")`, `Number(false)`
+ * and `Number([])` are 0, so a body carrying `"rejectedSpans": ""` beside
  * `"errorMessage": "dropped 4000 spans"` read as nothing-dropped and exited OK — the exact
  * failure `collectorSaid` exists to prevent, reached through the arm added to prevent it.
  * The other direction is as bad: `Number(true)` is 1 and `Number([5])` is 5, so non-counts
- * were being reported AS counts. int64 crosses OTLP/JSON as either a JSON number or a
- * string of digits; everything else is the collector saying something this cannot read, and
- * the caller is told so rather than handed a plausible number. */
-const spanCount = (v: unknown): number | null => {
-  if (v === undefined || v === null) return 0;
-  if (typeof v === 'number') return Number.isInteger(v) && v >= 0 ? v : null;
-  if (typeof v === 'string') return /^\d+$/.test(v) ? Number(v) : null;
+ * were reported AS counts. int64 crosses OTLP/JSON as either a JSON number or a string of
+ * digits; everything else is the collector saying something this cannot read.
+ *
+ * `null` is NOT one of those, and is 0 on purpose: proto3's JSON mapping defines JSON null
+ * for a scalar as the field's default. An absent field means the same thing, because
+ * protojson omits a zero int64 rather than writing it.
+ *
+ * ZERO-NESS AND TEXT, never a number, because nothing here needs arithmetic — only "did it
+ * say any were dropped" and "what exactly did it say". Parsing to a `number` quietly
+ * rounded a digit string past 2^53, so a collector reporting 9007199254740993 was printed
+ * back 9007199254740992: a wrong figure handed to the operator by the one function whose
+ * job is never to hand them a plausible wrong figure. Keeping the collector's own text
+ * makes the rounding unrepresentable rather than guarded against. */
+interface RejectedCount {
+  isZero: boolean;
+  /** The collector's own digits, echoed rather than reformatted. */
+  text: string;
+}
+const spanCount = (v: unknown): RejectedCount | null => {
+  if (v === undefined || v === null) return { isZero: true, text: '0' };
+  if (typeof v === 'number')
+    return Number.isInteger(v) && v >= 0 ? { isZero: v === 0, text: String(v) } : null;
+  if (typeof v === 'string')
+    return /^\d+$/.test(v) ? { isZero: /^0+$/.test(v), text: v } : null;
   return null;
 };
 
@@ -296,7 +313,16 @@ export async function run(command: Command, rt: Runtime): Promise<number> {
       let spans = 0;
       for (const session of file.sessions) {
         const { request, rows } = exportSession(session);
-        const { status, body } = await rt.post(command.endpoint, JSON.stringify(request));
+        // The session is named HERE because this is the layer that knows it. `postJson`
+        // names the endpoint and the phase, which is everything it has; the two checks
+        // below name the session. A network failure was the one export failure naming
+        // neither, so on a 700-session run the operator had to infer which session died
+        // from the last row on stdout. [LAW:no-silent-failure] [LAW:decomposition]
+        const { status, body } = await rt
+          .post(command.endpoint, JSON.stringify(request))
+          .catch((e: unknown) => {
+            throw new Error(`exporting session ${session.session}: ${message(e)}`);
+          });
 
         // [LAW:no-silent-failure] Checked after every call, before anything downstream
         // treats the export as done. A collector that refuses a session and a collector
@@ -475,12 +501,22 @@ const POST_TIMEOUT_MS = 30_000;
  * attached unconditionally and the original message rides along as detail.
  * [LAW:dataflow-not-control-flow] [LAW:no-silent-failure]
  *
- * The PHASE is tracked because "could not be reached" and "answered, then died" send the
- * reader to different places — the first to `--endpoint` and whether the collector is up,
- * the second to a collector that took the request and may already hold the spans. Saying
- * "did not answer" of a collector that answered 200 and then stalled is simply false.
+ * The PHASE is tracked because "nothing came back" and "it answered, then died" send the
+ * reader to different places: the second means a collector that took the request and may
+ * already hold the spans, so telling that reader the endpoint was unreachable would aim
+ * them at `--endpoint` and a restart when neither is the problem.
  * [LAW:no-ambient-temporal-coupling] the phase is state this function owns, not something
- * inferred from which line threw. */
+ * inferred from which line threw.
+ *
+ * "no response" and NOT "could not be reached", which is a claim this cannot support.
+ * `fetch` reports no connect event, so a collector that accepts the socket, takes the whole
+ * request and then never sends headers is indistinguishable here from one that was never
+ * listening — an earlier wording called both "could not be reached" and so told the first
+ * reader something false, in the very sentence added to stop the messages lying about the
+ * phase. What is actually known before headers arrive is only that nothing came back, so
+ * that is all this says; Bun's own text ("Unable to connect…") supplies the rest when it
+ * genuinely was a refusal. [LAW:types-are-the-program] don't represent a distinction you
+ * cannot observe. */
 export const makePostJson =
   (timeoutMs: number = POST_TIMEOUT_MS): Post =>
   async (url, json) => {
@@ -499,7 +535,7 @@ export const makePostJson =
       answered = true;
       return { status: res.status, body: await res.text() };
     } catch (e) {
-      const phase = answered ? 'answered, then failed before its body arrived' : 'could not be reached';
+      const phase = answered ? 'answered, then failed before its body arrived' : 'gave no response';
       const bound =
         e instanceof DOMException && e.name === 'TimeoutError' ? ` after ${timeoutMs / 1000}s` : '';
       throw new Error(`${url} ${phase}${bound}: ${message(e)}`);

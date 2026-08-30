@@ -653,6 +653,38 @@ describe('a command run end to end keeps its two streams apart', () => {
     }
   });
 
+  test('a null count is the field default, not an unreadable one', async () => {
+    // proto3's JSON mapping defines JSON null on a scalar as the field's default, so this
+    // says zero rejected — same as omitting the field, which is what protojson does with a
+    // zero int64. Pinned because the shape test deliberately does NOT route it to the
+    // unreadable arm, and that is a decision rather than an oversight.
+    const t = rt();
+    const nulled = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({ partialSuccess: { rejectedSpans: null, errorMessage: 'queue is nearly full' } }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], nulled)).toBe(EXIT.OK);
+    expect(t.err()).toContain('queue is nearly full');
+  });
+
+  test('a count past 2^53 is echoed, not rounded', async () => {
+    // `Number("9007199254740993")` is 9007199254740992. Reporting that back would hand the
+    // operator a wrong figure from the one function whose job is never to do that.
+    const t = rt();
+    const huge = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({ partialSuccess: { rejectedSpans: '9007199254740993' } }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], huge)).toBe(EXIT.FAILED);
+    expect(t.err()).toContain('9007199254740993 spans rejected');
+  });
+
   test('an ordinary 200 is not read as a partial rejection', async () => {
     // The other direction, so the check above cannot pass by failing everything: a
     // collector that stored the lot answers `{}` or `{"partialSuccess":{}}`.
@@ -920,8 +952,11 @@ describe('a failed export names the endpoint and the phase', () => {
   test('a collector that is not there is named, not just "unable to connect"', async () => {
     // Port 1 is reserved and nothing listens on it, so this is the connect-phase failure.
     const post = makePostJson(2_000);
+    // The bound is optional in the pattern on purpose: where a firewall DROPs rather
+    // than refuses, this fails as a timeout and the message carries ` after 2s`. Pinning
+    // its absence would fail for an environment reason rather than a behaviour one.
     await expect(post('http://127.0.0.1:1/v1/traces', '{}')).rejects.toThrow(
-      /127\.0\.0\.1:1\/v1\/traces could not be reached: /,
+      /127\.0\.0\.1:1\/v1\/traces gave no response( after [\d.]+s)?: /,
     );
   });
 
@@ -929,9 +964,13 @@ describe('a failed export names the endpoint and the phase', () => {
     // `verify-otlp.ts` documents this backend doing exactly this — "closes connections
     // part-way through the body". It is NOT a timeout, so a catch that renamed only
     // TimeoutError let this one out bare; that is the gap this pins.
+    // FIN after the request lands, never an RST on a timer. `destroy()` resets, and a
+    // reset lets the peer discard data still unread in its receive buffer — which could
+    // drop the very headers this asserts the client saw, flipping the phase for a timing
+    // reason. `end(HEADERS)` writes then closes cleanly, and keying off `data` rather than
+    // a 50ms timer removes the race entirely. [LAW:no-ambient-temporal-coupling]
     const { url, close } = await listening((sock) => {
-      sock.write(HEADERS);
-      setTimeout(() => sock.destroy(), 50);
+      sock.once('data', () => sock.end(HEADERS));
     });
     try {
       await expect(makePostJson(5_000)(url, '{}')).rejects.toThrow(
