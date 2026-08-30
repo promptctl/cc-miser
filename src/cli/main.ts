@@ -131,9 +131,9 @@ export type CollectorSaid =
  * export printed a trace id and exited OK, and the person who followed that id to Jaeger
  * found a trace quietly missing spans with nothing pointing back here.
  *
- * A body that is not JSON, or carries no `partialSuccess`, means nothing was rejected.
- * That is not a fallback: a collector reporting a rejection has one documented way to say
- * so, and its absence is the collector saying nothing was dropped. */
+ * A body that is not JSON, or carries no partial-success object, means nothing was
+ * rejected. That is not a fallback: a collector reporting a rejection has a documented way
+ * to say so, and its absence is the collector saying nothing was dropped. */
 export function collectorSaid(body: string): CollectorSaid {
   const parsed: unknown = ((): unknown => {
     try {
@@ -143,13 +143,26 @@ export function collectorSaid(body: string): CollectorSaid {
     }
   })();
   if (typeof parsed !== 'object' || parsed === null) return { kind: 'stored' };
-  const partial: unknown = (parsed as Record<string, unknown>)['partialSuccess'];
+  const partial: unknown = field(parsed as Record<string, unknown>, 'partialSuccess');
   if (typeof partial !== 'object' || partial === null) return { kind: 'stored' };
-  const { rejectedSpans, errorMessage } = partial as Record<string, unknown>;
+  const rejectedSpans = field(partial as Record<string, unknown>, 'rejectedSpans');
+  const errorMessage = field(partial as Record<string, unknown>, 'errorMessage');
   // The count crosses OTLP/JSON as a string, like every other int64 on this wire.
   const rejected = Number(rejectedSpans ?? 0);
   const note = typeof errorMessage === 'string' && errorMessage !== '' ? errorMessage : '';
-  if (!Number.isFinite(rejected) || rejected === 0)
+  // A count that will not parse is NOT a count of zero. Reading it as "nothing dropped"
+  // would exit OK on the one answer that says spans went missing and that we cannot
+  // interpret, so it fails the run with the raw value quoted. We cannot prove the export
+  // is whole, and an export that cannot be certified is not a success.
+  // [LAW:no-silent-failure]
+  if (!Number.isFinite(rejected))
+    return {
+      kind: 'rejected',
+      message: `unreadable rejected-span count ${JSON.stringify(rejectedSpans)}${
+        note === '' ? '' : `: ${note}`
+      }`,
+    };
+  if (rejected === 0)
     // Nothing dropped. The message, if there is one, is the collector's full-success
     // warning — the run continues and the reader still gets to see it.
     return note === '' ? { kind: 'stored' } : { kind: 'warned', message: note };
@@ -158,6 +171,19 @@ export function collectorSaid(body: string): CollectorSaid {
     message: `${rejected} spans rejected${note === '' ? '' : `: ${note}`}`,
   };
 }
+
+/** One protojson field under either of its two legal spellings.
+ *
+ * [LAW:one-source-of-truth] proto3's JSON mapping says a parser MUST accept both the
+ * lowerCamelCase name and the original `snake_case` one; only emitters get to pick, and a
+ * marshaler configured with `OrigName` picks the second. Read under one spelling, a
+ * genuine rejection from such a collector parses as `stored`, the run prints trace ids and
+ * exits OK, and the reader follows one to a trace missing spans — the exact failure this
+ * whole function exists to prevent, reintroduced by a naming convention. Jaeger and the
+ * OTel collector both emit camelCase today, which is what makes this cheap to get wrong
+ * and cheap to get right. */
+const field = (o: Record<string, unknown>, camel: string): unknown =>
+  o[camel] ?? o[camel.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`)];
 
 /** Discover, then narrow — the spine every command shares.
  *
@@ -418,17 +444,27 @@ const POST_TIMEOUT_MS = 30_000;
  * `--endpoint`. Trading an indefinite hang for an unactionable message is not the fix.
  * [LAW:no-silent-failure] */
 const postJson: Post = async (url, json) => {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: json,
-    signal: AbortSignal.timeout(POST_TIMEOUT_MS),
-  }).catch((e: unknown) => {
+  // BOTH awaits inside, because the deadline covers both phases and so must the naming.
+  // `AbortSignal.timeout` aborts the response body stream as well as the connection, so a
+  // collector that sends 200 headers and then stalls mid-body rejects at `.text()` — and
+  // wrapped around the `fetch` alone that rejection walks out bare. Measured: one byte
+  // then silence, and the run reported `The operation timed out.` naming neither endpoint
+  // nor wait. The body phase is the one this backend actually stalls in, per
+  // `scripts/verify-otlp.ts`, so leaving it uncovered would have missed the case the
+  // bound was added for.
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: json,
+      signal: AbortSignal.timeout(POST_TIMEOUT_MS),
+    });
+    return { status: res.status, body: await res.text() };
+  } catch (e) {
     if (e instanceof DOMException && e.name === 'TimeoutError')
       throw new Error(`${url} did not answer within ${POST_TIMEOUT_MS / 1000}s`);
     throw e;
-  });
-  return { status: res.status, body: await res.text() };
+  }
 };
 
 // `import.meta.main` is false when a test imports `run` above, so importing this module

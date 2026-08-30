@@ -577,6 +577,46 @@ describe('a command run end to end keeps its two streams apart', () => {
     expect(t.err()).toMatch(/stored session [0-9a-z-]+ with a warning/);
   });
 
+  test('a rejection spelled in snake_case is still a rejection', async () => {
+    // proto3's JSON mapping requires a PARSER to accept both spellings; only emitters
+    // choose, and a marshaler built with OrigName emits the snake_case one. Read under
+    // camelCase alone, this body parses as "nothing rejected" and the run exits OK having
+    // printed a trace id for a trace missing 7 spans — the failure the function exists to
+    // prevent, reintroduced through a naming convention.
+    const t = rt();
+    const snake = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({
+          partial_success: { rejected_spans: '7', error_message: 'attribute too long' },
+        }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], snake)).toBe(EXIT.FAILED);
+    expect(t.err()).toContain('7 spans rejected');
+    expect(t.err()).toContain('attribute too long');
+  });
+
+  test('a rejected-span count that will not parse fails the run', async () => {
+    // NOT a count of zero. Folded into "nothing dropped" this exits OK on the one answer
+    // that says spans went missing AND cannot be interpreted; an export that cannot be
+    // certified whole is not a success.
+    const t = rt();
+    const garbled = {
+      ...t.rt,
+      post: async () => ({
+        status: 200,
+        body: JSON.stringify({
+          partialSuccess: { rejectedSpans: 'lots', errorMessage: 'dropped 4000 spans' },
+        }),
+      }),
+    };
+    expect(await main(['otlp', '--projects', root], garbled)).toBe(EXIT.FAILED);
+    expect(t.err()).toContain('unreadable rejected-span count');
+    expect(t.err()).toContain('dropped 4000 spans');
+  });
+
   test('an ordinary 200 is not read as a partial rejection', async () => {
     // The other direction, so the check above cannot pass by failing everything: a
     // collector that stored the lot answers `{}` or `{"partialSuccess":{}}`.
