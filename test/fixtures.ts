@@ -169,8 +169,9 @@ export function buildTranscript(spec: TranscriptSpec): string {
    * bug that turns on the difference: a tool span anchored to its CALL rather than to its
    * own tool_use record renders identically under one clock and moves under two.
    *
-   * Groups stay inside their minute for any block count a fixture builds; sixty blocks
-   * would run into the minute the tool results occupy. */
+   * Groups stay inside their minute for any block count a fixture builds: `sec` is the
+   * 0-based block index, so sixty blocks reach 59 and stay put, and it takes sixty-one
+   * to roll over into the minute the tool results occupy. */
   const at = (i: number, sec = 0): string =>
     new Date(Date.UTC(2026, 0, 1, 0, startMinute + i, sec)).toISOString();
 
@@ -337,6 +338,72 @@ export const placeholderTailSession = (): string =>
           iterations: null,
         },
         content: [{ type: 'text', text: 'Done.' }],
+      },
+    }),
+  ].join('\n') + '\n';
+
+/** A transcript that answers ONE tool_use with TWO tool_result lines.
+ *
+ * Hand-written because the shared builder cannot express it and should not learn to:
+ * `ToolCallSpec` pairs exactly one result with each declared tool, which is the property
+ * that makes every ordinary fixture well-formed by construction. This is the malformed
+ * shape, so it is built the way `placeholderTailSession` is — literally.
+ *
+ * The two results differ in size so a test can tell WHICH one survived the join, rather
+ * than only that one did.
+ *
+ * `answering` is which id the two results claim to answer, and it is a PARAMETER because
+ * the interesting second case is a repeated result for an id nothing ever requested —
+ * where the right count is "two unmatched", not "one unmatched and one duplicate". Point
+ * it at an id this transcript never issues to build that. [LAW:dataflow-not-control-flow] */
+export const duplicateToolResultSession = (
+  answering = 'toolu_dup',
+  sessionId = 'aaaaaaaa-bbbb-cccc-dddd-ffffffffffff',
+): string =>
+  [
+    line({
+      type: 'user',
+      uuid: 'd0001',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      sessionId,
+      message: { role: 'user', content: 'read the file' },
+    }),
+    line({
+      type: 'assistant',
+      uuid: 'd0002',
+      timestamp: '2026-01-01T00:01:00.000Z',
+      sessionId,
+      requestId: 'req_dup',
+      message: {
+        role: 'assistant',
+        model: 'claude-opus-5',
+        usage: {
+          input_tokens: 10,
+          cache_creation_input_tokens: 100,
+          cache_read_input_tokens: 0,
+          output_tokens: 20,
+        },
+        content: [{ type: 'tool_use', id: 'toolu_dup', name: 'Read', input: { file_path: '/a.ts' } }],
+      },
+    }),
+    line({
+      type: 'user',
+      uuid: 'd0003',
+      timestamp: '2026-01-01T00:02:00.000Z',
+      sessionId,
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: answering, content: 'first' }],
+      },
+    }),
+    line({
+      type: 'user',
+      uuid: 'd0004',
+      timestamp: '2026-01-01T00:03:00.000Z',
+      sessionId,
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: answering, content: 'second-and-longer' }],
       },
     }),
   ].join('\n') + '\n';
