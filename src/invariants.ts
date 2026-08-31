@@ -139,7 +139,7 @@ const cacheSurvivingBoundaries = (conv: Conversation): Array<{ i: number; a: Cal
  * every one of them rather than a growing figure. For those, `usage` and `lastLineUsage`
  * agree by construction (a flat sequence's max equals its last element regardless of
  * which rule either side used), the same vacuous-match inflation excluded elsewhere in
- * this file (`groupsWithCacheCreationBreakdown`, and `predictable` in `residency.ts`).
+ * this file (`tieredCacheCreationSites`, and `predictable` in `residency.ts`).
  * Only a group whose output genuinely changes across its lines gives MAX and LAST
  * anything to disagree about, which is what makes their agreement there real evidence
  * rather than arithmetic. [LAW:no-silent-failure] */
