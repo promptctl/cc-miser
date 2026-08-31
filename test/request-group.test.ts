@@ -23,6 +23,7 @@ import {
   duplicateToolUseSession,
   placeholderTailSession,
   twoCallSession,
+  usageBlockSession,
 } from './fixtures.ts';
 
 const convOf = (text: string) => buildConversation(parseTranscript(text).lines);
@@ -72,6 +73,50 @@ describe('usage is the completed snapshot, not the first', () => {
       cacheRead: 86159,
       output: 278,
     });
+  });
+});
+
+// WHICH OF TWO CACHE-CREATION FIGURES THE CALL COSTS FROM. One usage block states it
+// twice — a flat `cache_creation_input_tokens` and a per-TTL `cache_creation` breakdown —
+// and on 8 of this laptop's 155,364 raw usage blocks the flat one reports 0 beside a real
+// 1h-tier write. Whoever holds the flat field bills those tokens at zero.
+//
+// [LAW:behavior-not-structure] These assert the figure a call ends up costing from, which
+// is what a page and an invoice see. Any reader that recovers the breakdown's total
+// passes; the flat-field reader that shipped fails the first case below by 902 tokens.
+// The shape is DATA passed to `usageBlockSession`, so this proves the fix on any machine
+// — the deployment target's corpus is one nobody here can see (miser-portability-adi.4),
+// and the corpus site that originally exposed this has already rotated out of ours.
+describe('cache creation is the per-tier total, not the flat summary', () => {
+  const withUsage = (usage: Record<string, unknown>) =>
+    convOf(usageBlockSession([{ input_tokens: 2, cache_read_input_tokens: 0, output_tokens: 50, ...usage }]));
+
+  test('a flat 0 beside a real 1h-tier write costs the 1h tokens', () => {
+    const conv = withUsage({
+      cache_creation_input_tokens: 0,
+      cache_creation: { ephemeral_1h_input_tokens: 902, ephemeral_5m_input_tokens: 0 },
+    });
+    expect(conv.calls[0]!.usage.cacheCreation).toBe(902);
+  });
+
+  test('a tier this parser has never heard of is costed the day it ships', () => {
+    // The breakdown is summed over every numeric member rather than the two tier names
+    // observed so far, so a third TTL needs no code change to be billed.
+    const conv = withUsage({
+      cache_creation_input_tokens: 1000,
+      cache_creation: {
+        ephemeral_5m_input_tokens: 400,
+        ephemeral_1h_input_tokens: 600,
+        ephemeral_1d_input_tokens: 300,
+      },
+    });
+    expect(conv.calls[0]!.usage.cacheCreation).toBe(1300);
+  });
+
+  test('a block with no breakdown costs the flat field — the only map it stated', () => {
+    const conv = withUsage({ cache_creation_input_tokens: 777 });
+    expect(conv.calls[0]!.usage.cacheCreation).toBe(777);
+    expect(conv.calls[0]!.cacheCreation).toEqual({ kind: 'flat-only' });
   });
 });
 
