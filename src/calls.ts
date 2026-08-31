@@ -129,7 +129,22 @@ export interface Arrival {
 
 export type ArrivalSource = 'toolResult' | 'userText' | 'attachment' | 'assistantOutput';
 
-/** A tool_use block paired with the tool_result line that answered it. */
+/** One tool_use block, and the tool_result line that answered it if one ever did.
+ *
+ * EVERY tool_use IS ONE OF THESE, answered or not, and that is a deliberate widening —
+ * it used to mean "a PAIR", built by walking the results, so a tool still running when
+ * the transcript was written had no `ToolExec` at all. The one consumer that needed a
+ * time for such a tool, `spans.ts`, substituted the enclosing CALL's timestamp for the
+ * tool's own, which made a tool span's position depend on whether a later record had
+ * arrived yet: exported mid-flight it sat at the call, and exported again after the
+ * result landed it moved. Jaeger's store keys a span partly on its start time, so that
+ * move left the superseded copy behind as a second span — miser-tracing-yhc.5's
+ * remainder, found by exporting a real growing session rather than a fixture.
+ *
+ * [LAW:one-source-of-truth] When this tool was requested is one fact with one home: the
+ * tool_use record. It is knowable the moment the block is read and never changes, so no
+ * consumer needs a second clock to fall back to. [LAW:types-are-the-program] The result's
+ * absence is now in the type rather than in a caller's `??`. */
 export interface ToolExec {
   toolUseId: string;
   name: string;
@@ -137,9 +152,13 @@ export interface ToolExec {
    * this. */
   summary: string;
   callIndex: number;
+  /** When the tool was REQUESTED — the tool_use record's own timestamp. */
   tsStart: number;
-  tsEnd: number;
-  resultChars: number;
+  /** When its result arrived, or null if the transcript ends before it did. */
+  tsEnd: number | null;
+  /** Size of that result, or null while there is no result to have a size.
+   * Distinct from `0`, which is a result that arrived and was empty. */
+  resultChars: number | null;
 }
 
 /** WHERE a turn's text came from.
@@ -184,6 +203,25 @@ export interface Conversation {
   /** Tool results whose tool_use block we never saw. Counted, never dropped.
    * [LAW:no-silent-failure] */
   unmatchedToolResults: number;
+  /** Tool results answering an id that already had one AND has a tool_use. The join
+   * keeps a single result per tool_use, so the duplicate gets no tool span and no
+   * `resultChars` — a gap in the JOIN, and the mirror of `unmatchedToolResults`.
+   *
+   * It is NOT a gap in cost, and saying "the analysis does not carry these" would be
+   * the tidier sentence and the wrong one. Both blocks were really in the transcript
+   * and really entered the context, so the `arrivals` loop pushes one per block and
+   * `attribution.ts` prices both. That is why it does not consult this join: skipping
+   * the second would under-report tokens the run actually paid for.
+   * [LAW:no-silent-failure]
+   *
+   * The two counters do not overlap: a repeated result for an id nothing requested is
+   * counted only as unmatched, so the anomalies are partitioned rather than
+   * double-reported. */
+  duplicateToolResults: number;
+  /** Tool_use blocks whose id was already taken by an earlier one. Each costs that
+   * earlier request its span, since `spans.ts` builds tool spans from the surviving
+   * entries — the request-side twin of `duplicateToolResults`. */
+  duplicateToolUses: number;
 }
 
 const SUMMARY_LEN = 90;
@@ -299,6 +337,7 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
   const arrivals: Arrival[] = [];
   const turns: Turn[] = [];
   const toolUses = new Map<string, { name: string; summary: string; callIndex: number; ts: number }>();
+  let duplicateToolUses = 0;
   const toolResults: Array<{ id: string; chars: number; ts: number }> = [];
 
   for (const line of lines) {
@@ -341,13 +380,29 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
         call.lineCount++;
         for (const block of line.blocks) {
           call.blocks.push(block); // unioned across the whole request group
-          if (isToolUse(block))
+          if (isToolUse(block)) {
+            // A second tool_use under an id already seen REPLACES the first, which costs
+            // that first request its whole span: `spans.ts` builds tool spans from this
+            // map's entries, so an overwritten one is a tool that never appears in the
+            // tree. Counted rather than left silent. [LAW:no-silent-failure]
+            //
+            // Not recovered, deliberately. A tool span's id is `tool:<toolUseId>`, so two
+            // requests sharing an id are two spans sharing a span id — which the store
+            // this stack now runs collapses into one anyway, and which would leave the
+            // report's deep link addressing both at once. A span that is absent and
+            // counted beats one that is present, ambiguous and uncounted.
+            //
+            // Measured on 2026-08-30: 67,251 tool_use blocks, zero blank ids and zero ids
+            // seen twice in a session. `records.ts` defaults a missing id to '', so the
+            // shape is reachable on a malformed transcript even though the corpus has none.
+            if (toolUses.has(block.id)) duplicateToolUses++;
             toolUses.set(block.id, {
               name: block.name,
               summary: display(block.input),
               callIndex: call.index,
               ts: line.ts,
             });
+          }
         }
         break;
       }
@@ -448,24 +503,46 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
       toolUseId: '',
     });
 
-  const tools: ToolExec[] = [];
-  let unmatchedToolResults = 0;
+  // THE JOIN RUNS OVER THE USES, not over the results. Walking the results yields only
+  // the tools that finished, which silently omits the tool that was still running when
+  // the transcript was written — the one a live session always has. Walking the uses
+  // yields every tool that was requested and lets the result be absent, which is the
+  // shape the data actually has. Iteration order is therefore transcript order of the
+  // requests, and stable regardless of when results come back.
+  // Indexing by id keeps only ONE result per tool_use, so a second result for an id
+  // already answered would vanish here — a whole result gone from every downstream
+  // figure with nothing to say it happened. It is counted instead. Measured across the
+  // corpus on 2026-08-30: 67,047 tool_result blocks, zero such duplicates, so this
+  // counts a shape the transcripts do not currently produce — which is the same
+  // likelihood `unmatchedToolResults` carries, and the same reason to count it rather
+  // than assume it away. [LAW:no-silent-failure]
+  //
+  // ONLY FOR AN ID THAT HAS A tool_use, so the two counters partition the anomalies
+  // instead of overlapping. A repeated result for an id nothing requested is already
+  // described in full by `unmatchedToolResults` — counting it here as well would report
+  // two bad records as three, in the note whose whole job is saying how much was lost.
+  const resultOf = new Map<string, { id: string; chars: number; ts: number }>();
+  let duplicateToolResults = 0;
   for (const r of toolResults) {
-    const use = toolUses.get(r.id);
-    if (!use) {
-      unmatchedToolResults++;
-      continue;
-    }
-    tools.push({
-      toolUseId: r.id,
+    if (resultOf.has(r.id) && toolUses.has(r.id)) duplicateToolResults++;
+    resultOf.set(r.id, r);
+  }
+
+  const tools: ToolExec[] = [...toolUses].map(([id, use]) => {
+    const answer = resultOf.get(id);
+    return {
+      toolUseId: id,
       name: use.name,
       summary: use.summary,
       callIndex: use.callIndex,
       tsStart: use.ts,
-      tsEnd: r.ts,
-      resultChars: r.chars,
-    });
-  }
+      tsEnd: answer === undefined ? null : answer.ts,
+      resultChars: answer === undefined ? null : answer.chars,
+    };
+  });
+  // A result whose tool_use block we never saw — the opposite gap, and still counted
+  // rather than dropped. [LAW:no-silent-failure]
+  const unmatchedToolResults = toolResults.filter((r) => !toolUses.has(r.id)).length;
 
   // Close turn extents: a turn runs until the next one starts.
   for (let i = 0; i < turns.length; i++) {
@@ -473,5 +550,13 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
     turns[i]!.lastCall = next ? next.firstCall - 1 : Math.max(0, calls.length - 1);
   }
 
-  return { calls, arrivals, tools, turns, unmatchedToolResults };
+  return {
+    calls,
+    arrivals,
+    tools,
+    turns,
+    unmatchedToolResults,
+    duplicateToolResults,
+    duplicateToolUses,
+  };
 }

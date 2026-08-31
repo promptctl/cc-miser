@@ -15,7 +15,15 @@
 import { expect, test, describe } from 'bun:test';
 import { buildConversation } from '../src/calls.ts';
 import { parseTranscript } from '../src/records.ts';
-import { placeholderTailSession, twoCallSession } from './fixtures.ts';
+import { resolveForest } from '../src/forest.ts';
+import { analyzeSession } from '../src/session.ts';
+import type { Span } from '../src/spans.ts';
+import {
+  duplicateToolResultSession,
+  duplicateToolUseSession,
+  placeholderTailSession,
+  twoCallSession,
+} from './fixtures.ts';
 
 const convOf = (text: string) => buildConversation(parseTranscript(text).lines);
 
@@ -64,6 +72,155 @@ describe('usage is the completed snapshot, not the first', () => {
       cacheRead: 86159,
       output: 278,
     });
+  });
+});
+
+// A tool_use is joined to at most ONE result, so a transcript offering two leaves one of
+// them out of every downstream figure. That the leftover is COUNTED is the whole reason
+// the counter exists, and a counter nothing exercises is a comment with a number in it —
+// the corpus has zero instances, so nothing else in the suite would notice it break.
+describe('a second result for one tool_use is counted, not swallowed', () => {
+  const conv = convOf(duplicateToolResultSession());
+
+  test('the extra result is reported', () => {
+    expect(conv.duplicateToolResults).toBe(1);
+  });
+
+  test('the surviving execution carries the LAST result', () => {
+    // Last-wins is what the join's overwrite means, and it is the half a future
+    // reordering would break while leaving the count above still correct.
+    expect(conv.tools.length).toBe(1);
+    expect(conv.tools[0]!.resultChars).toBe('second-and-longer'.length);
+  });
+});
+
+// The two counters must PARTITION the anomalies rather than overlap, and only an id with
+// no tool_use can tell the difference: a repeated result for a matched id is a duplicate
+// under either rule. Two results for an id nothing requested are two unmatched records
+// and nothing else — counting one of them as a duplicate as well would report two bad
+// records as three, in the note whose job is saying how much was lost.
+describe('a repeated result for an id nothing requested is only unmatched', () => {
+  const conv = convOf(duplicateToolResultSession('toolu_never_issued'));
+
+  test('both results count as unmatched', () => {
+    expect(conv.unmatchedToolResults).toBe(2);
+  });
+
+  test('neither is also counted as a duplicate', () => {
+    expect(conv.duplicateToolResults).toBe(0);
+  });
+
+  test('the tool that WAS requested is still carried, unanswered', () => {
+    expect(conv.tools.length).toBe(1);
+    expect(conv.tools[0]!.tsEnd).toBeNull();
+    expect(conv.tools[0]!.resultChars).toBeNull();
+  });
+});
+
+// The request-side twin, and the one with teeth: tool spans are built from these entries,
+// so a tool_use whose id was already taken is a tool that never appears in the tree at
+// all. The count is the only trace it leaves, which makes the count worth asserting.
+describe('a second tool_use under one id is counted, and costs the first its entry', () => {
+  const conv = convOf(duplicateToolUseSession());
+
+  /** The same fixture as a span tree. Shared so the two tree assertions below cannot
+   * drift onto different sessions. [LAW:one-source-of-truth] */
+  const treeOf = (): Span =>
+    analyzeSession(
+      {
+        project: 'proj',
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-999999999999',
+        path: '/corpus/proj/dup.jsonl',
+        bytes: 0,
+        mtime: 0,
+        subagents: [],
+        unpaired: [],
+      },
+      () => duplicateToolUseSession(),
+    ).tree;
+
+  /** The tool spans hanging off one call, in the order the tree presents them. */
+  const toolNamesUnderCall = (tree: Span, call: number): string[] =>
+    [...descend(tree)]
+      .filter((s) => s.detail.kind === 'call')
+      [call]!.children.flatMap((c) => (c.detail.kind === 'tool' ? [c.detail.name] : []));
+
+  test('the collision is reported', () => {
+    expect(conv.duplicateToolUses).toBe(1);
+  });
+
+  test('only the later request survives the join', () => {
+    // Two calls asked under one id; one entry remains for it, carrying the SECOND
+    // request's data. Naming the tool is what distinguishes "the later one won" from
+    // "one of them won". The sibling the second call also asked for is untouched.
+    expect(conv.calls.length).toBe(2);
+    const collided = conv.tools.filter((t) => t.toolUseId === 'toolu_same');
+    expect(collided.length).toBe(1);
+    expect(collided[0]!.name).toBe('Read');
+    expect(collided[0]!.callIndex).toBe(1);
+  });
+
+  test('the earlier request produces no tool span at all', () => {
+    // The consequence the counter exists to make visible, asserted on the tree rather
+    // than argued for in a comment: call 0 asked for a tool and has no tool child.
+    const tree = treeOf();
+    expect([...descend(tree)].filter((s) => s.detail.kind === 'call').length).toBe(2);
+    expect(toolNamesUnderCall(tree, 0)).toEqual([]);
+  });
+
+  test("the survivor is placed by when it was requested, not by its id's old slot", () => {
+    // THE VACUITY GUARD. `toolUses` is a Map and `set` on an existing key updates the
+    // value in place without moving it, so the colliding id keeps its FIRST-seen
+    // position and the raw join order is genuinely backwards here. If this stops being
+    // true the assertion below still passes while testing nothing.
+    expect(conv.tools.map((t) => t.name)).toEqual(['Read', 'Bash']);
+
+    // The behaviour: call 1 asked for Bash at 00:02 and Read at 00:03, so the tree owes
+    // a reader those two in that order regardless of where the map happened to keep them.
+    expect(toolNamesUnderCall(treeOf(), 1)).toEqual(['Bash', 'Read']);
+  });
+});
+
+/** Every span in the tree, parents before children. */
+function* descend(s: Span): Generator<Span> {
+  yield s;
+  for (const kid of s.children) yield* descend(kid);
+}
+
+// WHICH CALL A SUBAGENT IS ATTRIBUTED TO WHEN ITS SPAWNING ID COLLIDES, asserted rather
+// than reasoned about, because the reasoning is the kind that is easy to get backwards.
+//
+// A review raised the worry that `spans.ts` grafting kids by tool_use id could reattach a
+// subagent to a call that did not spawn it, on the grounds that `forest.ts` decides
+// lineage independently of the tool join. It does not decide it independently: `owner` is
+// built by walking raw `call.blocks` and overwriting per id, exactly as the tool join
+// does, over the same records in the same order. So both collapse to the LATER call and
+// agree, which is what this test pins — if they ever stop agreeing, a subagent's whole
+// rollup lands under a tool span that is not where it was grafted.
+describe('a colliding spawn id resolves to the same call the tool join kept', () => {
+  const conv = convOf(duplicateToolUseSession());
+  const kid = buildConversation(parseTranscript(twoCallSession('')).lines);
+  const forest = resolveForest(conv, [
+    {
+      meta: {
+        agentId: 'a_kid',
+        agentType: 'general-purpose',
+        description: 'spawned by the colliding id',
+        toolUseId: 'toolu_same',
+        declaredDepth: 1,
+      },
+      conversation: kid,
+    },
+  ]);
+
+  test('the spawn is placed, not orphaned', () => {
+    expect(forest.placed.length).toBe(1);
+    expect(forest.orphans.length).toBe(0);
+  });
+
+  test('it is attributed to the later call — the one whose ToolExec survived', () => {
+    expect(forest.placed[0]!.lineage.at(-1)!.spawnedAtCall).toBe(1);
+    expect(conv.tools[0]!.callIndex).toBe(1);
   });
 });
 

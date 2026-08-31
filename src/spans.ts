@@ -203,28 +203,44 @@ function buildConversationSpan(
 
   const callChildren = (c: Call): Span[] => {
     const out: Span[] = [];
-    for (const b of c.blocks) {
-      if (b.kind !== 'tool_use') continue;
-      const exec = conv.tools.find((e) => e.toolUseId === b.id);
+    // Driven by this call's tool EXECUTIONS rather than by its tool_use blocks, which
+    // lets the exec be read directly instead of looked up — and with the lookup goes the
+    // `??` fallback that stood in for a miss. That fallback was not merely noise:
+    // `tStart` fell back to the CALL's timestamp, so a tool still in flight sat at a
+    // different place on the axis than the same tool once its result arrived.
+    // [LAW:types-are-the-program]
+    //
+    // `buildConversation` makes a `ToolExec` for every tool_use block it reads, WITH ONE
+    // EXCEPTION worth stating because it is a real loss rather than a rewording: a block
+    // whose id was already taken overwrites the earlier entry, so the earlier request
+    // gets no exec and therefore no span here. `calls.ts` counts those as
+    // `duplicateToolUses`; the corpus has none. Saying "nothing is lost" would be
+    // pleasanter and untrue.
+    for (const exec of conv.tools.filter((e) => e.callIndex === c.index)) {
       const toolSpan: Span = {
-        id: `tool:${idPrefix}${b.id}`,
-        label: `${b.name} ${exec?.summary ?? ''}`.trim(),
+        id: `tool:${idPrefix}${exec.toolUseId}`,
+        label: `${exec.name} ${exec.summary}`.trim(),
         detail: {
           kind: 'tool',
-          name: b.name,
-          summary: exec?.summary ?? '',
-          resultChars: exec?.resultChars ?? 0,
+          name: exec.name,
+          summary: exec.summary,
+          // Characters of result RECEIVED, which is genuinely none while the tool is
+          // still running — not a stand-in for an unknown.
+          resultChars: exec.resultChars ?? 0,
         },
         lineage,
-        tStart: exec?.tsStart ?? c.ts,
-        tEnd: exec?.tsEnd ?? c.ts,
+        // Requested here, and — until its result lands — ending here too. A tool whose
+        // result never arrived is drawn as the zero-width instant we actually know
+        // about, rather than given a guessed extent.
+        tStart: exec.tsStart,
+        tEnd: exec.tsEnd ?? exec.tsStart,
         callFirst: c.index,
         callLast: c.index,
         children: [],
       };
       // Conversations this tool call spawned (the tool_use edge).
       for (const kid of kids.filter(
-        (k) => immediateAgent(k.lineage)!.via === 'tool_use' && k.meta.toolUseId === b.id,
+        (k) => immediateAgent(k.lineage)!.via === 'tool_use' && k.meta.toolUseId === exec.toolUseId,
       ))
         toolSpan.children.push(graft(kid, c.index));
       // A grafted conversation can outlast the tool result that started it; the
@@ -241,7 +257,14 @@ function buildConversationSpan(
         immediateAgent(k.lineage)!.spawnedAtCall === c.index,
     ))
       out.push(graft(kid, c.index));
-    return out;
+    // Chronological by DATA rather than by luck of construction. `conv.tools` carries
+    // the tool map's insertion order, and an id that collides updates its entry in
+    // place without moving it — so the surviving (later) request would sit at the
+    // earlier id's position, ahead of siblings actually requested before it. Ordering a
+    // span's children is the timeline's job, so it reads timestamps and no longer
+    // depends on which loop happened to push first.
+    // [LAW:no-ambient-temporal-coupling]
+    return out.sort((a, b) => a.tStart - b.tStart);
   };
 
   const callSpans = new Map<number, Span>();
