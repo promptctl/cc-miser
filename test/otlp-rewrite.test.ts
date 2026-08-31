@@ -169,8 +169,16 @@ describe('a session that grew re-exports onto its previous export', () => {
         expect(shared.length).toBe(wasSent.size);
       });
 
-      test('every span the first export sent keeps its trace', () => {
-        for (const id of shared) expect(isSentNow.get(id)!.traceId).toBe(wasSent.get(id)!.traceId);
+      // Deliberately NOT "every span keeps its trace". `exportSession` derives one
+      // traceId per export and stamps it on every span before any per-node logic runs,
+      // so comparing spans to each other within a domain has no reachable way to
+      // differ — it would pass against any derivation at all. What can really break is
+      // the derivation being unstable across two calls, which is what this pins.
+      // [LAW:behavior-not-structure]
+      test('the re-export lands in the same trace as the first', () => {
+        const wasTraceId = wasSent.get(shared[0]!)!.traceId;
+        expect(wasTraceId).not.toBe('');
+        expect(new Set(shared.map((id) => isSentNow.get(id)!.traceId))).toEqual(new Set([wasTraceId]));
       });
 
       // THE ASSERTION THIS FILE EXISTS FOR. A span in both exports must land on the same
@@ -197,4 +205,15 @@ describe('a session that grew re-exports onto its previous export', () => {
       });
     });
   }
+
+  // Stability across exports is also satisfied by a derivation that ignored the domain
+  // and put every service in ONE trace, so the test above cannot see that mistake. This
+  // is the one that fails if `traceIdOf` stops discriminating on domain.key: the
+  // domains would silently merge into a single trace holding several session trees.
+  test('each domain exports into a trace of its own', () => {
+    const traceIds = DOMAIN_KEYS.map(
+      (domain) => [...keysIn(after, DOMAINS[domain].service).values()][0]!.traceId,
+    );
+    expect(new Set(traceIds).size).toBe(DOMAIN_KEYS.length);
+  });
 });
