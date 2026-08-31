@@ -174,7 +174,7 @@ domain and the span-tree node, so the same call exports to the same id every tim
 is what lets the second export land on top of the first instead of beside it. It is also
 what lets the HTML report link to a span it never exported.
 
-**Jaeger runs `badger` here, not the default memory store,** because that store replaces a
+**Jaeger runs `badger` here, not the default memory store,** because badger replaces a
 re-sent span where the default accumulates both copies. That is the whole reason
 `telemetry/stack.sh` sets `SPAN_STORAGE_TYPE`; the measurement behind the choice is
 recorded there, and `bun run telemetry verify` re-checks it on the running container.
