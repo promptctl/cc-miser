@@ -203,13 +203,19 @@ function buildConversationSpan(
 
   const callChildren = (c: Call): Span[] => {
     const out: Span[] = [];
-    // Driven by this call's tool EXECUTIONS rather than by its tool_use blocks. The two
-    // are the same set — `buildConversation` makes a `ToolExec` for every tool_use block
-    // it pushes onto `call.blocks` — so nothing is lost, and taking the exec directly
-    // removes a lookup that could miss along with the `??` fallbacks that stood in for a
-    // miss. Those fallbacks were not merely noise: `tStart` fell back to the CALL's
-    // timestamp, so a tool still in flight sat at a different place on the axis than the
-    // same tool once its result arrived. [LAW:types-are-the-program]
+    // Driven by this call's tool EXECUTIONS rather than by its tool_use blocks, which
+    // lets the exec be read directly instead of looked up — and with the lookup goes the
+    // `??` fallback that stood in for a miss. That fallback was not merely noise:
+    // `tStart` fell back to the CALL's timestamp, so a tool still in flight sat at a
+    // different place on the axis than the same tool once its result arrived.
+    // [LAW:types-are-the-program]
+    //
+    // `buildConversation` makes a `ToolExec` for every tool_use block it reads, WITH ONE
+    // EXCEPTION worth stating because it is a real loss rather than a rewording: a block
+    // whose id was already taken overwrites the earlier entry, so the earlier request
+    // gets no exec and therefore no span here. `calls.ts` counts those as
+    // `duplicateToolUses`; the corpus has none. Saying "nothing is lost" would be
+    // pleasanter and untrue.
     for (const exec of conv.tools.filter((e) => e.callIndex === c.index)) {
       const toolSpan: Span = {
         id: `tool:${idPrefix}${exec.toolUseId}`,
