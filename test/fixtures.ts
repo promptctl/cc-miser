@@ -416,7 +416,13 @@ export const duplicateToolResultSession = (
  * the route by which a truncated transcript reaches it.
  *
  * The two requests carry different tool names so a test can say WHICH one survived the
- * join rather than only that one did. */
+ * join rather than only that one did.
+ *
+ * The second call also asks for a SIBLING tool, earlier in its own group than the
+ * colliding one. Without it every call holds a single tool and the children of a call
+ * have only one possible order, which hides the collision's second consequence: the
+ * surviving entry keeps the id's ORIGINAL position in the tool map, so it would sort
+ * ahead of a sibling that was really requested before it. */
 export const duplicateToolUseSession = (
   sessionId = 'aaaaaaaa-bbbb-cccc-dddd-999999999999',
 ): string =>
@@ -449,6 +455,24 @@ export const duplicateToolUseSession = (
     line({
       type: 'assistant',
       uuid: 'x0003',
+      timestamp: '2026-01-01T00:02:00.000Z',
+      sessionId,
+      requestId: 'req_second',
+      message: {
+        role: 'assistant',
+        model: 'claude-opus-5',
+        usage: {
+          input_tokens: 12,
+          cache_creation_input_tokens: 50,
+          cache_read_input_tokens: 100,
+          output_tokens: 15,
+        },
+        content: [{ type: 'tool_use', id: 'toolu_other', name: 'Bash', input: { command: 'ls' } }],
+      },
+    }),
+    line({
+      type: 'assistant',
+      uuid: 'x0004',
       timestamp: '2026-01-01T00:03:00.000Z',
       sessionId,
       requestId: 'req_second',
