@@ -204,11 +204,19 @@ export interface Conversation {
    * [LAW:no-silent-failure] */
   unmatchedToolResults: number;
   /** Tool results answering an id that already had one AND has a tool_use. The join
-   * keeps a single result per tool_use, so these are results the analysis does not
-   * carry — the same kind of gap as `unmatchedToolResults`, in the other direction.
+   * keeps a single result per tool_use, so the duplicate gets no tool span and no
+   * `resultChars` — a gap in the JOIN, and the mirror of `unmatchedToolResults`.
    *
-   * The two do not overlap: a repeated result for an id nothing requested is counted
-   * only as unmatched, so the anomalies are partitioned rather than double-reported. */
+   * It is NOT a gap in cost, and saying "the analysis does not carry these" would be
+   * the tidier sentence and the wrong one. Both blocks were really in the transcript
+   * and really entered the context, so the `arrivals` loop pushes one per block and
+   * `attribution.ts` prices both. That is why it does not consult this join: skipping
+   * the second would under-report tokens the run actually paid for.
+   * [LAW:no-silent-failure]
+   *
+   * The two counters do not overlap: a repeated result for an id nothing requested is
+   * counted only as unmatched, so the anomalies are partitioned rather than
+   * double-reported. */
   duplicateToolResults: number;
   /** Tool_use blocks whose id was already taken by an earlier one. Each costs that
    * earlier request its span, since `spans.ts` builds tool spans from the surviving
