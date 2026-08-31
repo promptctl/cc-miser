@@ -15,7 +15,15 @@
 import { expect, test, describe } from 'bun:test';
 import { buildConversation } from '../src/calls.ts';
 import { parseTranscript } from '../src/records.ts';
-import { duplicateToolResultSession, placeholderTailSession, twoCallSession } from './fixtures.ts';
+import { resolveForest } from '../src/forest.ts';
+import { analyzeSession } from '../src/session.ts';
+import type { Span } from '../src/spans.ts';
+import {
+  duplicateToolResultSession,
+  duplicateToolUseSession,
+  placeholderTailSession,
+  twoCallSession,
+} from './fixtures.ts';
 
 const convOf = (text: string) => buildConversation(parseTranscript(text).lines);
 
@@ -106,6 +114,91 @@ describe('a repeated result for an id nothing requested is only unmatched', () =
     expect(conv.tools.length).toBe(1);
     expect(conv.tools[0]!.tsEnd).toBeNull();
     expect(conv.tools[0]!.resultChars).toBeNull();
+  });
+});
+
+// The request-side twin, and the one with teeth: tool spans are built from these entries,
+// so a tool_use whose id was already taken is a tool that never appears in the tree at
+// all. The count is the only trace it leaves, which makes the count worth asserting.
+describe('a second tool_use under one id is counted, and costs the first its entry', () => {
+  const conv = convOf(duplicateToolUseSession());
+
+  test('the collision is reported', () => {
+    expect(conv.duplicateToolUses).toBe(1);
+  });
+
+  test('only the later request survives the join', () => {
+    // Two calls asked; one entry remains, carrying the SECOND request's data. Naming the
+    // tool is what distinguishes "the later one won" from "one of them won".
+    expect(conv.calls.length).toBe(2);
+    expect(conv.tools.length).toBe(1);
+    expect(conv.tools[0]!.name).toBe('Read');
+    expect(conv.tools[0]!.callIndex).toBe(1);
+  });
+
+  test('the earlier request produces no tool span at all', () => {
+    // The consequence the counter exists to make visible, asserted on the tree rather
+    // than argued for in a comment: call 0 asked for a tool and has no tool child.
+    const tree = analyzeSession(
+      {
+        project: 'proj',
+        sessionId: 'aaaaaaaa-bbbb-cccc-dddd-999999999999',
+        path: '/corpus/proj/dup.jsonl',
+        bytes: 0,
+        mtime: 0,
+        subagents: [],
+        unpaired: [],
+      },
+      () => duplicateToolUseSession(),
+    ).tree;
+
+    const calls = [...descend(tree)].filter((s) => s.detail.kind === 'call');
+    expect(calls.length).toBe(2);
+    expect(calls[0]!.children.filter((c) => c.detail.kind === 'tool').length).toBe(0);
+    expect(calls[1]!.children.filter((c) => c.detail.kind === 'tool').length).toBe(1);
+  });
+});
+
+/** Every span in the tree, parents before children. */
+function* descend(s: Span): Generator<Span> {
+  yield s;
+  for (const kid of s.children) yield* descend(kid);
+}
+
+// WHICH CALL A SUBAGENT IS ATTRIBUTED TO WHEN ITS SPAWNING ID COLLIDES, asserted rather
+// than reasoned about, because the reasoning is the kind that is easy to get backwards.
+//
+// A review raised the worry that `spans.ts` grafting kids by tool_use id could reattach a
+// subagent to a call that did not spawn it, on the grounds that `forest.ts` decides
+// lineage independently of the tool join. It does not decide it independently: `owner` is
+// built by walking raw `call.blocks` and overwriting per id, exactly as the tool join
+// does, over the same records in the same order. So both collapse to the LATER call and
+// agree, which is what this test pins — if they ever stop agreeing, a subagent's whole
+// rollup lands under a tool span that is not where it was grafted.
+describe('a colliding spawn id resolves to the same call the tool join kept', () => {
+  const conv = convOf(duplicateToolUseSession());
+  const kid = buildConversation(parseTranscript(twoCallSession('')).lines);
+  const forest = resolveForest(conv, [
+    {
+      meta: {
+        agentId: 'a_kid',
+        agentType: 'general-purpose',
+        description: 'spawned by the colliding id',
+        toolUseId: 'toolu_same',
+        declaredDepth: 1,
+      },
+      conversation: kid,
+    },
+  ]);
+
+  test('the spawn is placed, not orphaned', () => {
+    expect(forest.placed.length).toBe(1);
+    expect(forest.orphans.length).toBe(0);
+  });
+
+  test('it is attributed to the later call — the one whose ToolExec survived', () => {
+    expect(forest.placed[0]!.lineage.at(-1)!.spawnedAtCall).toBe(1);
+    expect(conv.tools[0]!.callIndex).toBe(1);
   });
 });
 

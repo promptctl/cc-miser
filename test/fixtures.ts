@@ -408,6 +408,64 @@ export const duplicateToolResultSession = (
     }),
   ].join('\n') + '\n';
 
+/** A transcript issuing TWO tool_use blocks under one id, from two different calls.
+ *
+ * Hand-written for the same reason as `duplicateToolResultSession`: the shared builder
+ * takes each tool's id from the spec and a well-formed transcript never repeats one, so
+ * this shape has to be written out. `records.ts` defaults a missing id to `''`, which is
+ * the route by which a truncated transcript reaches it.
+ *
+ * The two requests carry different tool names so a test can say WHICH one survived the
+ * join rather than only that one did. */
+export const duplicateToolUseSession = (
+  sessionId = 'aaaaaaaa-bbbb-cccc-dddd-999999999999',
+): string =>
+  [
+    line({
+      type: 'user',
+      uuid: 'x0001',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      sessionId,
+      message: { role: 'user', content: 'do two things' },
+    }),
+    line({
+      type: 'assistant',
+      uuid: 'x0002',
+      timestamp: '2026-01-01T00:01:00.000Z',
+      sessionId,
+      requestId: 'req_first',
+      message: {
+        role: 'assistant',
+        model: 'claude-opus-5',
+        usage: {
+          input_tokens: 10,
+          cache_creation_input_tokens: 100,
+          cache_read_input_tokens: 0,
+          output_tokens: 20,
+        },
+        content: [{ type: 'tool_use', id: 'toolu_same', name: 'Grep', input: { pattern: 'first' } }],
+      },
+    }),
+    line({
+      type: 'assistant',
+      uuid: 'x0003',
+      timestamp: '2026-01-01T00:03:00.000Z',
+      sessionId,
+      requestId: 'req_second',
+      message: {
+        role: 'assistant',
+        model: 'claude-opus-5',
+        usage: {
+          input_tokens: 12,
+          cache_creation_input_tokens: 50,
+          cache_read_input_tokens: 100,
+          output_tokens: 30,
+        },
+        content: [{ type: 'tool_use', id: 'toolu_same', name: 'Read', input: { file_path: '/b.ts' } }],
+      },
+    }),
+  ].join('\n') + '\n';
+
 /** A one-call transcript whose request group's usage blocks are written VERBATIM.
  *
  * `buildTranscript` synthesizes a plausible streaming ramp across a group's lines, which
