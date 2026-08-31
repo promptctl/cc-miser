@@ -209,7 +209,7 @@ describe('cache-creation-accounted', () => {
       },
     ]);
 
-  test('holds when the per-TTL tiers total the flat figure the pipeline costs from', () => {
+  test('holds when the per-TTL tiers total the flat figure stated beside them', () => {
     const a = auditOne(
       'cache-creation-accounted',
       analyzed(tiered(1000, { ephemeral_5m_input_tokens: 400, ephemeral_1h_input_tokens: 600 })),
@@ -219,35 +219,46 @@ describe('cache-creation-accounted', () => {
   });
 
   test('is not a site at all when the block carries no breakdown — there is nothing to check', () => {
-    // Not "held trivially": EXCLUDED. A no-breakdown call makes unaccountedCacheCreation
-    // 0 by construction, and counting that as a checked-and-passed site would be the same
-    // vacuous-match inflation `residency-predicts-cache-read` had to be fixed for.
+    // Not "held trivially": EXCLUDED. With one map there is no rival to close against and
+    // the claim would be `x === x`; counting that as a checked-and-passed site would be
+    // the same vacuous-match inflation `residency-predicts-cache-read` had to be fixed for.
     const a = auditOne('cache-creation-accounted', analyzed(tiered(1000, null)));
     expect(a.sites).toBe(0);
     expect(a.violations).toEqual([]);
   });
 
-  test('BREAKS when a tier is not included in the flat total — format drift on the token axis', () => {
-    // What a new TTL tier looks like on the day it ships: the line type is unchanged, every
-    // field we read is still there, and the one figure everything costs from is short.
+  test('holds when the flat total is SHORT of the tiers — the API summary being lossy', () => {
+    // The observed corpus shape, and the reason the pipeline costs from the breakdown:
+    // 8 of 155,364 raw usage blocks state `flat: 0` beside a real 1h-tier write. The flat
+    // field claims nothing the tiers do not, so nothing here is unaccounted for. Note this
+    // is NOT the row being forgiving — it is the row being about the other direction.
     const a = auditOne(
       'cache-creation-accounted',
-      analyzed(
-        tiered(1000, {
-          ephemeral_5m_input_tokens: 400,
-          ephemeral_1h_input_tokens: 600,
-          ephemeral_1d_input_tokens: 300,
-        }),
-      ),
+      analyzed(tiered(0, { ephemeral_1h_input_tokens: 902, ephemeral_5m_input_tokens: 0 })),
+    );
+    expect(a.violations).toEqual([]);
+    expect(a.sites).toBe(1);
+  });
+
+  test('BREAKS when the flat total claims tokens no tier accounts for', () => {
+    // The falsification of the whole authority choice: if the flat field can carry tokens
+    // the breakdown does not, the breakdown is not a superset and costing from it
+    // under-reports. That is the one thing left for this row to alarm on, and it has never
+    // been observed — 0 blocks of 155,364.
+    const a = auditOne(
+      'cache-creation-accounted',
+      analyzed(tiered(1000, { ephemeral_5m_input_tokens: 400, ephemeral_1h_input_tokens: 300 })),
     );
     expect(a.held).toBe(false);
     expect(a.violations[0]!.left).toBe(300);
     expect(a.violations[0]!.site).toContain('call 0');
   });
 
-  test('the tier figure follows the snapshot the dedup rule adopted, not some other line', () => {
-    // Reading completeness off a line whose usage nobody used would report on a figure
-    // that never reached a page. The group's finished line is the one that counts.
+  test('the compared figures follow the snapshot the dedup rule adopted, not some other line', () => {
+    // Closing against a line whose usage nobody used would report on a figure that never
+    // reached a page. The group's finished line is the one that counts — here the first
+    // line agrees and the adopted one does not, so a reader taking either the first line
+    // or a per-field mix would score this green.
     const s = analyzed(
       usageBlockSession([
         {
@@ -260,7 +271,7 @@ describe('cache-creation-accounted', () => {
         {
           input_tokens: 2,
           cache_creation_input_tokens: 500,
-          cache_creation: { ephemeral_5m_input_tokens: 900 },
+          cache_creation: { ephemeral_5m_input_tokens: 100 },
           cache_read_input_tokens: 0,
           output_tokens: 99,
         },

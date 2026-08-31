@@ -24,8 +24,7 @@ const mkCall = (index: number, usage: Usage): Call => ({
   usage,
   lastLineUsage: usage,
   outputVaries: false,
-  unaccountedCacheCreation: 0,
-  hasCacheCreationBreakdown: false,
+  cacheCreation: { kind: 'flat-only' },
   blocks: [],
 });
 

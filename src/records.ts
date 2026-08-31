@@ -40,14 +40,9 @@ export interface AssistantLine {
   requestId: string;
   model: string;
   usage: Usage;
-  /** Cache-creation tokens this line's own per-TTL breakdown reports that `usage`
-   * does not account for. See `ParsedUsage`. */
-  unaccountedCacheCreation: number;
-  /** Whether this line's `usage` block carried a `cache_creation` breakdown at all.
-   * False makes `unaccountedCacheCreation` trivially 0 — there was nothing to disagree
-   * with — which is a different fact from a breakdown that was checked and matched. See
-   * `ParsedUsage`. */
-  hasCacheCreationBreakdown: boolean;
+  /** Which account of cache creation `usage.cacheCreation` was taken from, and the flat
+   * figure this line stated beside it. See `CacheCreation`. */
+  cacheCreation: CacheCreation;
   blocks: ContentBlock[];
 }
 
@@ -200,43 +195,73 @@ function toolInputText(input: Json): string {
   return first || `${jsonChars(input)} chars`;
 }
 
-/** The usage vector, plus whether it is a COMPLETE account of what the line reported.
+/** The usage vector, plus the rival account of cache creation the same block carried.
  *
- * The API states cache creation twice in one block: once as the flat
- * `cache_creation_input_tokens` that every downstream cost is computed from, and once as
- * a `cache_creation` object broken out per TTL tier. Two maps of one fact, and a map that
- * can drift will. [FRAMING:representation] */
+ * The API states cache creation twice in one block: once as a flat
+ * `cache_creation_input_tokens`, and once as a `cache_creation` object broken out per TTL
+ * tier. Two maps of one fact, and a map that can drift will. [FRAMING:representation] */
 interface ParsedUsage {
   usage: Usage;
-  /** Cache-creation tokens the per-tier breakdown reports that the flat field does not
-   * total. Zero on all 91,301 blocks carrying a breakdown today — and also, trivially,
-   * on every block with no breakdown at all. See `hasCacheCreationBreakdown`. */
-  unaccountedCacheCreation: number;
-  /** Whether `u.cache_creation` was present, i.e. whether `unaccountedCacheCreation`
-   * reflects a real comparison rather than "nothing to compare". */
-  hasCacheCreationBreakdown: boolean;
+  cacheCreation: CacheCreation;
 }
 
+/** Which account of cache creation `usage.cacheCreation` came from, and the rival figure
+ * where there was one.
+ *
+ * [LAW:types-are-the-program] A union rather than a `flatTotal` beside a
+ * `hasBreakdown: boolean`, because the pair admits a state the API cannot produce — a
+ * rival total on a block that stated no rival — and every consumer would then have to
+ * remember which field licenses the other. Here the rival figure is unreachable until
+ * you have discriminated, so "is this a real comparison or nothing to compare" is
+ * answered by the compiler rather than by a convention. */
+export type CacheCreation =
+  /** No `cache_creation` object: the flat field is the only map, and `usage.cacheCreation`
+   * carries it. Never observed on this laptop's 155,364 usage blocks, all of which carry a
+   * breakdown — but the field was added to the API at some point, and the deployment
+   * target's corpus is one nobody here can see (miser-portability-adi.4). */
+  | { kind: 'flat-only' }
+  /** A `cache_creation` object was present and `usage.cacheCreation` is its total.
+   * `flatTotal` is the flat field beside it — the rival map, read nowhere else in the
+   * pipeline, which is what lets `cache-creation-accounted` close the costed figure
+   * against a number the pipeline does not derive from. */
+  | { kind: 'tiered'; flatTotal: number };
+
+/** WHICH MAP IS AUTHORITATIVE, and why it is the breakdown. [LAW:one-source-of-truth]
+ *
+ * Measured over every raw assistant usage block on this laptop (155,364 blocks, scanned
+ * without any of this pipeline's code): the flat field reports cache-creation tokens that
+ * no tier claims on ZERO blocks, while the breakdown reports tokens the flat field omits
+ * on 8 — every one of them a `flat: 0` beside a non-zero `ephemeral_1h_input_tokens`,
+ * i.e. the flat total sporadically dropping a whole 1h-tier write. So the disagreement
+ * runs one way only: the flat field is a sometimes-lossy summary, never a superset.
+ *
+ * The structural argument agrees with the measurement and outlives it: a sum is always
+ * derivable from its parts, and the parts are never recoverable from the sum. Costing
+ * from the breakdown can only ever be at least as complete as costing from the flat
+ * field, whatever tiers Anthropic adds next. */
 function parseUsage(raw: unknown): ParsedUsage {
   const u = asObj(raw) ?? {};
-  const cacheCreation = num(u.cache_creation_input_tokens);
+  const flatTotal = num(u.cache_creation_input_tokens);
   // EVERY numeric member is summed, not the two tier names observed so far. A tier this
   // parser has never heard of must not become invisible by virtue of being unnamed here —
-  // that is the drift this check exists to hear about. A block with no breakdown at all
-  // states nothing to disagree with, and so contributes the flat figure itself.
+  // which is why reading the breakdown needs no update when a third TTL ships, and why
+  // the drift the flat field showed cannot recur on this side.
   const tiers = asObj(u.cache_creation);
-  const brokenOut = tiers
-    ? Object.values(tiers).reduce((a: number, v) => a + num(v), 0)
-    : cacheCreation;
+  // The figure and its provenance are chosen TOGETHER, in one expression, so a
+  // `usage.cacheCreation` taken from one map cannot end up labelled with the other. Two
+  // ternaries on `tiers` would have left that agreement to whoever edits them next.
+  // [LAW:one-source-of-truth]
+  const [costed, provenance]: [number, CacheCreation] = tiers
+    ? [Object.values(tiers).reduce((a: number, v) => a + num(v), 0), { kind: 'tiered', flatTotal }]
+    : [flatTotal, { kind: 'flat-only' }];
   return {
     usage: {
       input: num(u.input_tokens),
-      cacheCreation,
+      cacheCreation: costed,
       cacheRead: num(u.cache_read_input_tokens),
       output: num(u.output_tokens),
     },
-    unaccountedCacheCreation: brokenOut - cacheCreation,
-    hasCacheCreationBreakdown: tiers !== null,
+    cacheCreation: provenance,
   };
 }
 
@@ -264,8 +289,7 @@ export function parseLine(raw: unknown): SessionLine {
         requestId: str(o.requestId) || str(msg.id) || uuid,
         model: str(msg.model, '(unknown-model)'),
         usage: parsed.usage,
-        unaccountedCacheCreation: parsed.unaccountedCacheCreation,
-        hasCacheCreationBreakdown: parsed.hasCacheCreationBreakdown,
+        cacheCreation: parsed.cacheCreation,
         blocks: content.map(parseBlock),
       };
     }

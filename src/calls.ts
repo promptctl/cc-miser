@@ -3,7 +3,7 @@
 //
 // [LAW:effects-at-boundaries] Pure. Takes records, returns a conversation.
 
-import type { ContentBlock, SessionLine } from './records.ts';
+import type { CacheCreation, ContentBlock, SessionLine } from './records.ts';
 import { estimatedSize, exactSize, type Size, type Usage } from './tokens.ts';
 
 /** One API request.
@@ -49,16 +49,9 @@ export interface Call {
    * varies across their lines — most are flat, and MAX vs LAST agrees on a flat sequence
    * by construction regardless of which line either rule would have picked. */
   outputVaries: boolean;
-  /** Cache-creation tokens the adopted snapshot's own per-TTL breakdown reported and its
-   * flat total did not account for. Zero everywhere in the corpus; non-zero means the one
-   * figure this pipeline costs cache writes from has stopped totalling the tiers beside
-   * it. See `ParsedUsage` in `records.ts`. Trivially zero, rather than checked-and-zero,
-   * when `hasCacheCreationBreakdown` is false. */
-  unaccountedCacheCreation: number;
-  /** Whether the adopted snapshot's line carried a `cache_creation` breakdown at all —
-   * i.e. whether `unaccountedCacheCreation` is evidence or a vacuous non-comparison. See
-   * `ParsedUsage` in `records.ts`. */
-  hasCacheCreationBreakdown: boolean;
+  /** Which account of cache creation `usage.cacheCreation` was taken from, and the flat
+   * figure the adopted snapshot stated beside it. See `CacheCreation` in `records.ts`. */
+  cacheCreation: CacheCreation;
   blocks: ContentBlock[];
 }
 
@@ -102,12 +95,11 @@ const completeUsage = (a: UsageSnapshot, b: UsageSnapshot): UsageSnapshot =>
  * claim accounts for itself.
  *
  * The two travel together so the dedup rule chooses between whole snapshots. Reading
- * `unaccountedCacheCreation` off some other line of the group than the one whose usage
- * was adopted would report the completeness of a figure nobody used. */
+ * `cacheCreation` off some other line of the group than the one whose usage was adopted
+ * would report the provenance of a figure nobody used. */
 interface UsageSnapshot {
   usage: Usage;
-  unaccountedCacheCreation: number;
-  hasCacheCreationBreakdown: boolean;
+  cacheCreation: CacheCreation;
 }
 
 /** Something that entered the context window between two calls. */
@@ -356,8 +348,7 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
           usage: line.usage,
           lastLineUsage: line.usage,
           outputVaries: false,
-          unaccountedCacheCreation: line.unaccountedCacheCreation,
-          hasCacheCreationBreakdown: line.hasCacheCreationBreakdown,
+          cacheCreation: line.cacheCreation,
           blocks: [],
         };
         byRequest.set(line.requestId, call);
@@ -375,8 +366,7 @@ export function buildConversation(lines: readonly SessionLine[]): Conversation {
         // first line happened to carry.
         const chosen = completeUsage(call, line);
         call.usage = chosen.usage;
-        call.unaccountedCacheCreation = chosen.unaccountedCacheCreation;
-        call.hasCacheCreationBreakdown = chosen.hasCacheCreationBreakdown;
+        call.cacheCreation = chosen.cacheCreation;
         call.lineCount++;
         for (const block of line.blocks) {
           call.blocks.push(block); // unioned across the whole request group
