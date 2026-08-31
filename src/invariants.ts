@@ -13,8 +13,10 @@
 //
 // So an identity earns its place here by being closeable against a number NEITHER
 // implementation derived. Two below have that shape and say so in their `basis`:
-// `cache-creation-accounted` closes the figure this pipeline costs from against a
-// breakdown of the same fact in the same API usage block, and `cache-read-recurrence`
+// `cache-creation-accounted` closes the figure this pipeline costs from against the flat
+// summary of the same fact stated beside it in the same API usage block — a field the
+// pipeline reads nowhere else, which is the whole reason it can serve as a witness — and
+// `cache-read-recurrence`
 // closes one call's reported `cache_read` against two fields of the call before it. The
 // rest are internal, and are marked as such rather than flattered.
 //
@@ -144,15 +146,23 @@ const cacheSurvivingBoundaries = (conv: Conversation): Array<{ i: number; a: Cal
 const groupsWithRealLastLine = (conv: Conversation): Call[] =>
   conv.calls.filter((c) => c.outputVaries && USAGE_COMPONENTS.some((k) => c.lastLineUsage[k] !== 0));
 
-/** Calls whose adopted line's usage block carried a `cache_creation` breakdown.
+/** Calls whose adopted usage block stated cache creation TWICE, paired with the flat
+ * rival the pipeline did not cost from.
  *
- * A block with none makes `unaccountedCacheCreation` trivially 0 — nothing was there to
- * disagree with `cache_creation_input_tokens` — which is a different fact from a
- * breakdown that was checked and found to sum correctly. Excluded the same way
+ * A block stating it once has no rival to close against — the flat field IS the figure
+ * costed there, so the claim below would be `x === x`. Excluded the same way
  * `groupsWithRealLastLine` excludes placeholder tails: not a violation and not an
- * exception, a call with nothing to claim. [LAW:no-silent-failure] */
-const groupsWithCacheCreationBreakdown = (conv: Conversation): Call[] =>
-  conv.calls.filter((c) => c.hasCacheCreationBreakdown);
+ * exception, a call with nothing to claim. [LAW:no-silent-failure]
+ *
+ * The pairing is what makes the exclusion structural rather than remembered: `flatTotal`
+ * lives inside the `tiered` variant, so there is no way to reach a rival figure at a site
+ * that never stated one. [LAW:types-are-the-program] */
+const tieredCacheCreationSites = (conv: Conversation): Array<{ call: Call; flatTotal: number }> =>
+  conv.calls.flatMap((call) =>
+    call.cacheCreation.kind === 'tiered'
+      ? [{ call, flatTotal: call.cacheCreation.flatTotal }]
+      : [],
+  );
 
 const flatUsage = (s: AnalyzedSession): Usage =>
   conversationsOf(s)
@@ -183,25 +193,36 @@ export const IDENTITIES: readonly Identity[] = [
   {
     name: 'cache-creation-accounted',
     says:
-      'the flat cache_creation figure this pipeline costs from totals the per-TTL ' +
-      'breakdown reported beside it in the same API usage block',
+      'every cache-creation token the flat cache_creation_input_tokens field reports is ' +
+      'accounted for by the per-TTL breakdown this pipeline costs from',
     basis:
-      'LAW, and one of the two rows that closes against figures NEITHER implementation ' +
-      'derived: both sides are raw API output, and the breakdown is read nowhere else in ' +
-      'the pipeline. Exact across every call whose adopted line carries a breakdown — a ' +
-      'call with none is excluded from being a site at all (`groupsWithCacheCreationBreakdown`), ' +
-      'because there `unaccountedCacheCreation` is 0 by construction rather than by a ' +
-      'check that ran and passed; counting it as a site would inflate this row exactly ' +
-      "the way an unfiltered `residency-predicts-cache-read` used to. It is also the " +
-      'only alarm for format drift on the TOKEN axis — a new TTL tier that stops being ' +
-      'included in the flat total leaves the line type, and every field we read, ' +
-      'unchanged, so `unknownTypes` is structurally blind to it.',
+      'LAW, and one of the two rows that closes against a figure NEITHER implementation ' +
+      'derived: both sides are raw API output, and the flat field is read nowhere else in ' +
+      'the pipeline. Exact across every call whose adopted block states cache creation ' +
+      'twice — a block stating it once is excluded from being a site at all ' +
+      '(`tieredCacheCreationSites`), because there the two sides are the same number and ' +
+      'the row would score a tautology; counting it as a site would inflate this row ' +
+      "exactly the way an unfiltered `residency-predicts-cache-read` used to. " +
+      'ONE-SIDED ON PURPOSE, and this is not a widened tolerance — the rate is still 0 ' +
+      'and every site is still checked. Measured over all 155,364 raw usage blocks on ' +
+      'the authoring machine, the two maps disagree in one direction only: the flat ' +
+      'field claims tokens no tier accounts for on ZERO blocks, while the breakdown ' +
+      'reports tokens the flat field omits on 8 — each a `flat: 0` beside a non-zero ' +
+      '`ephemeral_1h_input_tokens`. That second direction is the API summary being ' +
+      'lossy, which `parseUsage` now prices correctly by reading the breakdown, so it is ' +
+      'no longer a defect to alarm on. What remains alarming is the first direction, ' +
+      'because it is the assumption the whole authority choice rests on: if the flat ' +
+      'field ever carries tokens the tiers do not, the breakdown is not a superset and ' +
+      'this pipeline is under-reporting again. The drift this row used to watch for — a ' +
+      'new TTL tier silently excluded from the total — is now designed out rather than ' +
+      'detected: `parseUsage` sums every numeric member of the breakdown, so an unnamed ' +
+      'third tier is costed the day it ships.',
     maxViolationRate: 0,
     claims: (s) =>
       conversationsOf(s).flatMap(({ what, conv }) =>
-        groupsWithCacheCreationBreakdown(conv).map((c) => ({
-          site: `${what} call ${c.index}: cache-creation tiers vs flat total`,
-          left: c.unaccountedCacheCreation,
+        tieredCacheCreationSites(conv).map(({ call, flatTotal }) => ({
+          site: `${what} call ${call.index}: flat cache-creation total vs tiers costed`,
+          left: Math.max(0, flatTotal - call.usage.cacheCreation),
           right: 0,
         })),
       ),
