@@ -112,7 +112,13 @@ function notesFor(
   const unknown = Object.entries(stats.unknownTypes);
   return [
     `${stats.byKind.assistant} JSONL lines collapsed to ${conv.calls.length} API calls (${fanOut.toFixed(2)}x fan-out)`,
-    `${conv.tools.length} tool executions paired, ${conv.unmatchedToolResults} unmatched`,
+    // `conv.tools` is every tool REQUESTED, so the paired count is derived rather than
+    // read off its length — which is what that length used to mean. The unanswered ones
+    // are worth their own number: on a live transcript they are the tools still running,
+    // and on a finished one they are interrupts. [LAW:one-source-of-truth]
+    `${conv.tools.filter((t) => t.tsEnd !== null).length} of ${conv.tools.length} tool executions ` +
+      `paired with a result, ${conv.unmatchedToolResults} results unmatched, ` +
+      `${conv.duplicateToolResults} duplicate results, ${conv.duplicateToolUses} duplicate requests`,
     ...(stats.unparseableLines ? [`${stats.unparseableLines} unparseable JSONL lines`] : []),
     // A line type we have never seen means the transcript format moved under us. It is
     // named here rather than counted silently, because every downstream number is

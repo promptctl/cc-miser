@@ -79,6 +79,35 @@ readonly PORT_PROMETHEUS=19090
 # OTLP port would be a second place to send traces to. [LAW:single-enforcer]
 readonly CONTAINER_PORT_JAEGER_OTLP=4317
 
+# WHICH SPAN STORE JAEGER RUNS, and it is not the default. This is the whole of the fix
+# for miser-tracing-yhc.5, so the reasoning lives here rather than in a ticket nobody
+# reads from a shell script.
+#
+# WHAT WAS MEASURED, on 2026-08-30, by posting one span twice to a throwaway all-in-one
+# under each store and reading the trace back — because the docs do not state this at a
+# resolution that decides it:
+#
+#   memory   re-sending a span APPENDS. The trace then holds both versions, which is why
+#            re-exporting a session that grew produced two root spans and a doubled span
+#            count, and why the only cure was wiping the entire store.
+#   badger   re-sending a span REPLACES it. Same trace, one span, the newer content.
+#
+# THE PART THAT IS EASY TO GET WRONG, and the reason `test/otlp-rewrite.test.ts` exists:
+# badger keys a span on (traceId, startTime, spanId), NOT on (traceId, spanId). Re-sending
+# with a DIFFERENT start time appends exactly like `memory` did. So this store fixes
+# re-export only for as long as the exporter derives a given span's start time the same
+# way twice, and that is a property of `cli/otlp.ts`, not of this file. The test asserts
+# it; this comment is why it may not be deleted.
+#
+# EPHEMERAL, so `down` still destroys the store and `down && up` remains the full reset
+# the README points at for the one case re-export cannot fix — an id derivation that
+# changed, which orphans the previous trace rather than superseding it. Badger persists to
+# disk if pointed at a directory, and that was measured to work here (a bind-mounted store
+# survived the container being removed and recreated); it is not adopted because this
+# stack has no restart path to benefit from it — `up` refuses to run while the containers
+# exist, so every route back through here goes via `down`. [LAW:carrying-cost]
+readonly JAEGER_STORAGE=badger
+
 TELEMETRY_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly TELEMETRY_DIR
 readonly RUN_DIR="$TELEMETRY_DIR/.run"
@@ -212,6 +241,8 @@ cmd_up() {
   run_detached "$JAEGER" \
     --publish "$PORT_JAEGER_UI:$CONTAINER_PORT_JAEGER_UI" \
     --env COLLECTOR_OTLP_ENABLED=true \
+    --env "SPAN_STORAGE_TYPE=$JAEGER_STORAGE" \
+    --env BADGER_EPHEMERAL=true \
     "$IMAGE_JAEGER"
   local jaeger_addr
   jaeger_addr=$(wait_for_address "$JAEGER")
@@ -354,28 +385,90 @@ verify_grpc() {
   fi
 }
 
-# The HTTP leg, over the published OTLP HTTP port, sent from the host itself. OTLP/JSON needs
-# nothing but curl, which makes this the most faithful reproduction available of what a
-# process on this machine does when it exports.
-verify_http() {
-  local service=$1 trace_id span_id start_ns end_ns payload code
+# One span, posted through the published OTLP/HTTP port. The wire shape lives here alone,
+# so the two checks that send spans this way can differ only in the values they vary —
+# and `verify_replaces` below depends on being able to re-send a span identical to an
+# earlier one in every field but its name. [LAW:one-source-of-truth]
+post_span() {
+  local service=$1 trace_id=$2 span_id=$3 start_ns=$4 name=$5 end_ns payload code
 
-  trace_id=$(openssl rand -hex 16)
-  span_id=$(openssl rand -hex 8)
-  start_ns=$(( $(date +%s) * 1000000000 ))
   end_ns=$((start_ns + 1000000))
+  payload=$(printf '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"%s"}}]},"scopeSpans":[{"scope":{"name":"telemetry/stack.sh"},"spans":[{"traceId":"%s","spanId":"%s","name":"%s","kind":1,"startTimeUnixNano":"%s","endTimeUnixNano":"%s"}]}]}]}' \
+    "$service" "$trace_id" "$span_id" "$name" "$start_ns" "$end_ns")
 
-  payload=$(printf '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"%s"}}]},"scopeSpans":[{"scope":{"name":"telemetry/stack.sh"},"spans":[{"traceId":"%s","spanId":"%s","name":"stack-verify","kind":1,"startTimeUnixNano":"%s","endTimeUnixNano":"%s"}]}]}]}' \
-    "$service" "$trace_id" "$span_id" "$start_ns" "$end_ns")
-
-  say "sending a span over HTTP to localhost:$PORT_OTLP_HTTP"
   code=$(curl -sS -o /dev/null -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' --data "$payload" \
     "http://localhost:$PORT_OTLP_HTTP/v1/traces") \
     || die "could not reach the collector on localhost:$PORT_OTLP_HTTP"
 
   [[ $code == 200 ]] \
-    || die "the collector rejected the test span: HTTP $code from localhost:$PORT_OTLP_HTTP/v1/traces"
+    || die "the collector rejected a test span: HTTP $code from localhost:$PORT_OTLP_HTTP/v1/traces"
+}
+
+# The HTTP leg, over the published OTLP HTTP port, sent from the host itself. OTLP/JSON needs
+# nothing but curl, which makes this the most faithful reproduction available of what a
+# process on this machine does when it exports.
+verify_http() {
+  local service=$1 trace_id span_id start_ns
+
+  trace_id=$(openssl rand -hex 16)
+  span_id=$(openssl rand -hex 8)
+  start_ns=$(( $(date +%s) * 1000000000 ))
+
+  say "sending a span over HTTP to localhost:$PORT_OTLP_HTTP"
+  post_span "$service" "$trace_id" "$span_id" "$start_ns" "stack-verify"
+}
+
+# THE STORE SUPERSEDES A RE-SENT SPAN RATHER THAN ACCUMULATING BOTH — the property
+# `miser otlp` relies on to re-export a session that grew, and the one thing about this
+# stack that could be taken away silently.
+#
+# It is configuration, not code: `up` asks for `SPAN_STORAGE_TYPE=badger` and the image
+# obliges. Nothing here owns that promise. An image whose `:latest` moved, a renamed or
+# retired env var — Jaeger v1 is past its own end-of-life notice — or a changed default
+# would all put the memory store back, and every symptom would be downstream and quiet: a
+# trace holding two versions of one session, two root spans, and totals computed over
+# both. Exactly the shape of the 2026-08-26 failure this command was written for, so it
+# gets checked the same way: ask Jaeger, do not assume the config took.
+#
+# The second span is IDENTICAL to the first but for its name, because the store keys a
+# span on (traceId, startTime, spanId) — varying the start time would append under any
+# backend and prove nothing.
+verify_replaces() {
+  local service=$1 trace_id span_id start_ns deadline body spans
+
+  trace_id=$(openssl rand -hex 16)
+  span_id=$(openssl rand -hex 8)
+  start_ns=$(( $(date +%s) * 1000000000 ))
+
+  say "posting one span twice to :$PORT_OTLP_HTTP to prove the store replaces it"
+  post_span "$service" "$trace_id" "$span_id" "$start_ns" "first-version"
+  await_trace "$service" \
+    || die "the first of the two replacement-test spans never reached Jaeger"
+  post_span "$service" "$trace_id" "$span_id" "$start_ns" "second-version"
+
+  # Wait for the SECOND write to be visible before counting, and wait for it by name. A
+  # count taken while only the first span had landed would read 1 and PASS — the very
+  # answer this check exists to earn — so the arrival of the new version is what opens
+  # the question, never a sleep. [LAW:no-ambient-temporal-coupling]
+  deadline=$((SECONDS + ARRIVAL_TIMEOUT))
+  while ((SECONDS < deadline)); do
+    body=$(curl -sS "http://localhost:$PORT_JAEGER_UI/api/traces/$trace_id") || body=''
+    if printf '%s' "$body" | jq -e '[.data[0].spans[]? | select(.operationName == "second-version")] | length > 0' >/dev/null 2>&1; then
+      spans=$(printf '%s' "$body" | jq -r '(.data[0].spans // []) | length')
+      [[ $spans == 1 ]] && return 0
+      die "$(
+        printf 'Jaeger kept %s spans where one span was sent twice under one id.\n' "$spans"
+        printf 'The span store is appending rather than replacing, so re-exporting a\n'
+        printf 'session that grew will leave its previous export in the trace.\n'
+        printf 'Check that %s still honours SPAN_STORAGE_TYPE=%s:\n' "$IMAGE_JAEGER" "$JAEGER_STORAGE"
+        printf '  container logs %s\n' "$JAEGER"
+      )"
+    fi
+    sleep 1
+  done
+
+  die "the re-sent span never appeared in Jaeger within ${ARRIVAL_TIMEOUT}s; cannot tell whether the store replaces"
 }
 
 cmd_verify() {
@@ -387,10 +480,11 @@ cmd_verify() {
     has_line "$running" "$name" || die "$name is not running. Bring the stack up first: $0 up"
   done
 
-  local stamp grpc_service http_service
+  local stamp grpc_service http_service rewrite_service
   stamp="$(date +%s)-$$"
   grpc_service="cc-miser-verify-grpc-$stamp"
   http_service="cc-miser-verify-http-$stamp"
+  rewrite_service="cc-miser-verify-rewrite-$stamp"
 
   verify_grpc "$grpc_service"
   verify_http "$http_service"
@@ -409,8 +503,14 @@ cmd_verify() {
     die "no trace arrived in Jaeger within ${ARRIVAL_TIMEOUT}s for:$failures"
   fi
 
+  # Only once both legs are known to deliver: a replacement check run over a broken
+  # transport would fail for a reason that has nothing to do with the span store, and
+  # name the wrong cause. The arrival checks above are what make its answer readable.
+  verify_replaces "$rewrite_service"
+
   say ""
-  say "verified: spans sent over :$PORT_OTLP_GRPC and :$PORT_OTLP_HTTP both arrived in Jaeger"
+  say "verified: spans sent over :$PORT_OTLP_GRPC and :$PORT_OTLP_HTTP both arrived in Jaeger,"
+  say "          and a span sent twice under one id is stored once, not twice"
   say "  http://localhost:$PORT_JAEGER_UI/search?service=$grpc_service"
   say "  http://localhost:$PORT_JAEGER_UI/search?service=$http_service"
 }
@@ -423,7 +523,8 @@ Usage: $0 <command>
   down    stop and remove all three, the network, and the generated run state
   status  report which containers are running and which host ports are open
   verify  send real spans through the published OTLP ports and confirm via
-          Jaeger's query API that they arrived; fail loudly when they did not
+          Jaeger's query API that they arrived, and that a span sent twice
+          under one id is stored once; fail loudly when either is untrue
 
 Jaeger UI      http://localhost:$PORT_JAEGER_UI
 Prometheus     http://localhost:$PORT_PROMETHEUS

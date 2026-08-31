@@ -41,11 +41,20 @@ machine, with an unrelated collector held up by a restart policy. cc-miser publi
 the containers the services still listen on the standard ports; only the host-side
 mapping moved. `telemetry/stack.sh` is the one place either set is written down.
 
-Run `verify` after every `up`, before trusting anything you see. It sends real spans
-through both published OTLP ports and then asks Jaeger's query API whether those exact
-spans arrived, so it catches the case where the transport succeeds and the data
-vanishes anyway. That is not hypothetical: it is how the previous Docker stack failed
-on 2026-08-26 — every port open, every connection accepted, nothing ever stored.
+Run `verify` after every `up`, before trusting anything you see. It checks two things,
+and can fail for either reason.
+
+It sends real spans through both published OTLP ports and then asks Jaeger's query API
+whether those exact spans arrived, so it catches the case where the transport succeeds and
+the data vanishes anyway. That is not hypothetical: it is how the previous Docker stack
+failed on 2026-08-26 — every port open, every connection accepted, nothing ever stored.
+
+Then it sends one span *twice* under the same id and confirms Jaeger stored it once. That
+is the property `miser otlp` relies on to re-export a session that grew (see below), and
+it is configuration rather than code — so a moved image or a retired environment variable
+could take it away with no symptom except wrong traces. A failure here reads `Jaeger kept
+2 spans where one span was sent twice under one id` and means the span store is appending;
+nothing is wrong with the transport.
 
 `telemetry/stack.sh` is the script behind all four commands, and it is worth reading
 once if you touch this stack. The part that surprises people: containers on this
@@ -151,33 +160,43 @@ Everything the report can group by is a tag: `model`, `tool_name`, `subagent_typ
 numeric tag across spans, every span also carries its whole subtree's cost already summed,
 as `cc_miser.rollup.*`.
 
-### Re-exporting, and the one case where it bites
+### Re-exporting a session that grew
 
-Trace and span ids are derived from the session rather than drawn at random. Re-exporting an
-**unchanged** session is therefore idempotent — measured on a clean store, a 125-span session
-exported twice is still 125 spans, not 250.
+Re-export it. The new export supersedes the old one, and the trace ends up holding the
+current version of the session and nothing else. A transcript still being written is the
+one you most want to look at, so this is ordinary usage rather than something to avoid.
 
-Two cases break that, both worth knowing because both are silent in the UI and loud in
-`verify:otlp`:
+Two things make that work, and they are worth knowing because a change to either one
+brings the old behaviour back.
 
-**The session grew.** A transcript still being written gains calls, so `call:12` may exist in
-the new export and not the old — but `call:3` exists in both, with the same derived id and
-*different* content. This store keeps both. The trace then holds the previous export's spans
-alongside the new ones: `verify:otlp` reports it as two root spans and a span count well over
-what the pipeline would export now. Exporting a live session is fine; exporting it *again*
-later needs a reset first.
+**Ids are derived, not drawn at random.** A span's id is a digest over the session, the
+domain and the span-tree node, so the same call exports to the same id every time — which
+is what lets the second export land on top of the first instead of beside it. It is also
+what lets the HTML report link to a span it never exported.
 
-**The id derivation changed.** Change what goes into the hash and the previous export becomes
-an orphan trace beside the new one, which shows up as `session.id` finding two traces.
+**Jaeger runs `badger` here, not the default memory store,** because badger replaces a
+re-sent span where the default accumulates both copies. That is the whole reason
+`telemetry/stack.sh` sets `SPAN_STORAGE_TYPE`; the measurement behind the choice is
+recorded there, and `bun run telemetry verify` re-checks it on the running container.
 
-Jaeger's store here is in-memory, so the reset for either is `bun run telemetry down && bun
-run telemetry up`.
+The catch worth carrying: badger keys a span on `(traceId, startTime, spanId)`. A span
+re-sent with a *different* start time appends exactly like the memory store did. So the
+exporter has to derive a given span's start time the same way twice, and
+`test/otlp-rewrite.test.ts` is what holds it to that — it exports a fixture session, grows
+it, exports it again, and asserts every span present in both landed on the same key. Change
+how a layout positions spans and that test is what tells you.
 
-Resetting the whole store to refresh one session is a workaround, not an answer — a session
-still in progress is exactly the one you want to look at, so re-exporting it is ordinary
-usage. `miser-tracing-yhc.5` holds that work and the three routes out of it.
+What still needs a reset:
 
-`verify:otlp` is what turns that paragraph into a claim you can check: it asks Jaeger — not
+**The id derivation changed.** Change what goes into the hash and the previous export
+becomes an orphan trace beside the new one — a different trace id is a different trace, so
+nothing supersedes anything. It shows up as `session.id` finding two traces.
+
+The store is ephemeral, so the reset is `bun run telemetry down && bun run telemetry up`.
+That still wipes everything, which is why it is reserved for the case above rather than
+being the routine way to refresh a session.
+
+`verify:otlp` is what turns all of that into a claim you can check: it asks Jaeger — not
 the exporter — whether the trace is there, whether every span arrived, whether every
 subagent nests under the span that spawned it, whether the total equals the report's, and
 whether each dimension actually finds the trace when you filter on it.
@@ -192,11 +211,14 @@ session proved it wrong.
 
 Point it at the smallest session that carries the dimensions you care about. Full coverage
 needs subagent spawns, which puts you at several hundred spans; that is supported, and
-8c55cbcd, 525 spans, exercises every dimension. Jaeger's search returns whole traces and its
-in-memory store cuts the connection part-way through the large ones — 14 of 24 reads there —
-so `truncated response, retrying (n/20)` lines are the run absorbing a known failure, not
-hitting one. A dimension the session does not carry is reported NOT EXERCISED rather than
-passed, so a clean run never claims more than it checked.
+8c55cbcd, 525 spans, exercises every dimension. Jaeger's search returns whole traces and cuts
+the connection part-way through the large ones, so `truncated response, retrying (n/20)` lines
+are the run absorbing a known failure, not hitting one. It is the server doing that and not
+the store: it was measured under the memory store, and it survived the move to badger
+unchanged. `jaegerGet` in `scripts/verify-otlp.ts` carries the measurement and the retry
+budget it sizes — one copy, next to the constant it justifies, because it was a number drifting
+from its reason that broke this before. A dimension the session does not carry is reported NOT
+EXERCISED rather than passed, so a clean run never claims more than it checked.
 
 ## What this does not do
 
