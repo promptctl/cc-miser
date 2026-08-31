@@ -493,9 +493,9 @@ const POST_TIMEOUT_MS = 30_000;
  * the connection and then never answers leaves a bare `fetch` awaiting forever: no exit
  * code, no stderr, no partial answer — the loudest failure design in this file defeated by
  * a socket that simply goes quiet. That is not hypothetical for this backend; the retry
- * budget in `scripts/verify-otlp.ts` exists because its memory store stalls part-way
- * through bodies under load, measured on the read path. The write path gets a bound for
- * the same reason.
+ * budget in `scripts/verify-otlp.ts` exists because Jaeger stalls part-way through bodies
+ * under load, measured on the read path and unchanged by the move to badger. The write path
+ * gets a bound for the same reason.
  *
  * EVERY failure is re-thrown NAMED, which is a rule rather than a list of cases. Measured
  * under Bun 1.2.23, the three ways one POST fails carry three unrelated messages and not

@@ -123,21 +123,34 @@ async function search(service: string, tags: Record<string, string>): Promise<Ja
  * WHY A RETRY IS THE RIGHT ANSWER HERE, WHICH TOOK MEASURING TO ESTABLISH. Jaeger's search
  * API returns WHOLE traces — no projection, no id-only form — so each of the two dozen
  * queries below re-serialises the entire trace, 2.5MB for a 1,463-span session. Under that
- * repetition `jaeger-all-in-one`'s memory store closes connections part-way through the
- * body, and it is the SERVER doing it: the failure reproduces through Bun's `fetch` (as
- * ECONNRESET), through curl into a pipe, and through curl straight to a file — three
- * clients, one behaviour. Identical requests then succeed.
+ * repetition `jaeger-all-in-one` closes connections part-way through the body, and it is the
+ * SERVER doing it: the failure reproduces through Bun's `fetch` (as ECONNRESET), through curl
+ * into a pipe, and through curl straight to a file — three clients, one behaviour. Identical
+ * requests then succeed.
  *
  * HOW OFTEN IT FAILS DECIDES THE BUDGET, which is why the number below is measured and not
  * estimated. Against the 525-span domain of session `8c55cbcd` — an 894KB response, and the
  * very session `telemetry/README.md` hands you to verify — 14 of 24 reads truncated on
- * 2026-08-30: a 58% per-read failure rate. An earlier estimate of "roughly a third" sized
- * this budget at 5, which leaves 0.58^5 ≈ 7% per query and, over the two dozen queries a run
- * makes, failed FOUR RUNS IN FIVE — the shape the bug actually took, on the one command the
- * README promises will prove the export arrived. Twenty attempts gives 0.58^20 ≈ 2e-5 per
+ * 2026-08-30, under the memory store this stack ran then: a 58% per-read failure rate. That
+ * store is named because it is when the number was taken, not because it is the cause — see
+ * below. An earlier estimate of "roughly a third" sized this budget at 5, which leaves
+ * 0.58^5 ≈ 7% per query and, over the two dozen queries a run makes, failed FOUR RUNS IN
+ * FIVE — the shape the bug actually took, on the one command the README promises will
+ * prove the export arrived. Twenty attempts gives 0.58^20 ≈ 2e-5 per
  * query, under one run in a thousand. Re-measure before retuning it: the measurement is the
  * reason and the constant is only its residue, and it was the two drifting apart that broke
  * this. [FRAMING:representation]
+ *
+ * THE STORE IS NOT THE CAUSE, which is worth stating because the stack moved to badger and
+ * the truncation moved with it. Re-measured 2026-08-31 against the same 894KB response: it
+ * still cuts out, 5 of 19 completed reads back-to-back and again with half a second between
+ * them. Switching stores neither caused this nor cures it, so the budget stays and a reader
+ * who arrives here after the badger change is not sent looking for a fix that landed.
+ *
+ * Those two runs are deliberately NOT restated as a rate. Both ended with `all-in-one`
+ * stopping under sustained large reads, and a denominator that ends in a dead server is not
+ * a measurement — a fresh fabricated number would be worse than the stale honest one above.
+ * Retune only from a run that finishes.
  *
  * That is a flaky read-only GET against a local dev backend, and retrying one is ordinary.
  * What it must not become is a loop that retries until it likes the answer: exhaustion is
