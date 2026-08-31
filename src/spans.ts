@@ -257,7 +257,14 @@ function buildConversationSpan(
         immediateAgent(k.lineage)!.spawnedAtCall === c.index,
     ))
       out.push(graft(kid, c.index));
-    return out;
+    // Chronological by DATA rather than by luck of construction. `conv.tools` carries
+    // the tool map's insertion order, and an id that collides updates its entry in
+    // place without moving it — so the surviving (later) request would sit at the
+    // earlier id's position, ahead of siblings actually requested before it. Ordering a
+    // span's children is the timeline's job, so it reads timestamps and no longer
+    // depends on which loop happened to push first.
+    // [LAW:no-ambient-temporal-coupling]
+    return out.sort((a, b) => a.tStart - b.tStart);
   };
 
   const callSpans = new Map<number, Span>();

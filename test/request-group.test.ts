@@ -123,23 +123,10 @@ describe('a repeated result for an id nothing requested is only unmatched', () =
 describe('a second tool_use under one id is counted, and costs the first its entry', () => {
   const conv = convOf(duplicateToolUseSession());
 
-  test('the collision is reported', () => {
-    expect(conv.duplicateToolUses).toBe(1);
-  });
-
-  test('only the later request survives the join', () => {
-    // Two calls asked; one entry remains, carrying the SECOND request's data. Naming the
-    // tool is what distinguishes "the later one won" from "one of them won".
-    expect(conv.calls.length).toBe(2);
-    expect(conv.tools.length).toBe(1);
-    expect(conv.tools[0]!.name).toBe('Read');
-    expect(conv.tools[0]!.callIndex).toBe(1);
-  });
-
-  test('the earlier request produces no tool span at all', () => {
-    // The consequence the counter exists to make visible, asserted on the tree rather
-    // than argued for in a comment: call 0 asked for a tool and has no tool child.
-    const tree = analyzeSession(
+  /** The same fixture as a span tree. Shared so the two tree assertions below cannot
+   * drift onto different sessions. [LAW:one-source-of-truth] */
+  const treeOf = (): Span =>
+    analyzeSession(
       {
         project: 'proj',
         sessionId: 'aaaaaaaa-bbbb-cccc-dddd-999999999999',
@@ -152,10 +139,45 @@ describe('a second tool_use under one id is counted, and costs the first its ent
       () => duplicateToolUseSession(),
     ).tree;
 
-    const calls = [...descend(tree)].filter((s) => s.detail.kind === 'call');
-    expect(calls.length).toBe(2);
-    expect(calls[0]!.children.filter((c) => c.detail.kind === 'tool').length).toBe(0);
-    expect(calls[1]!.children.filter((c) => c.detail.kind === 'tool').length).toBe(1);
+  /** The tool spans hanging off one call, in the order the tree presents them. */
+  const toolNamesUnderCall = (tree: Span, call: number): string[] =>
+    [...descend(tree)]
+      .filter((s) => s.detail.kind === 'call')
+      [call]!.children.flatMap((c) => (c.detail.kind === 'tool' ? [c.detail.name] : []));
+
+  test('the collision is reported', () => {
+    expect(conv.duplicateToolUses).toBe(1);
+  });
+
+  test('only the later request survives the join', () => {
+    // Two calls asked under one id; one entry remains for it, carrying the SECOND
+    // request's data. Naming the tool is what distinguishes "the later one won" from
+    // "one of them won". The sibling the second call also asked for is untouched.
+    expect(conv.calls.length).toBe(2);
+    const collided = conv.tools.filter((t) => t.toolUseId === 'toolu_same');
+    expect(collided.length).toBe(1);
+    expect(collided[0]!.name).toBe('Read');
+    expect(collided[0]!.callIndex).toBe(1);
+  });
+
+  test('the earlier request produces no tool span at all', () => {
+    // The consequence the counter exists to make visible, asserted on the tree rather
+    // than argued for in a comment: call 0 asked for a tool and has no tool child.
+    const tree = treeOf();
+    expect([...descend(tree)].filter((s) => s.detail.kind === 'call').length).toBe(2);
+    expect(toolNamesUnderCall(tree, 0)).toEqual([]);
+  });
+
+  test("the survivor is placed by when it was requested, not by its id's old slot", () => {
+    // THE VACUITY GUARD. `toolUses` is a Map and `set` on an existing key updates the
+    // value in place without moving it, so the colliding id keeps its FIRST-seen
+    // position and the raw join order is genuinely backwards here. If this stops being
+    // true the assertion below still passes while testing nothing.
+    expect(conv.tools.map((t) => t.name)).toEqual(['Read', 'Bash']);
+
+    // The behaviour: call 1 asked for Bash at 00:02 and Read at 00:03, so the tree owes
+    // a reader those two in that order regardless of where the map happened to keep them.
+    expect(toolNamesUnderCall(treeOf(), 1)).toEqual(['Bash', 'Read']);
   });
 });
 
