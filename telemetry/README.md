@@ -211,11 +211,14 @@ session proved it wrong.
 
 Point it at the smallest session that carries the dimensions you care about. Full coverage
 needs subagent spawns, which puts you at several hundred spans; that is supported, and
-8c55cbcd, 525 spans, exercises every dimension. Jaeger's search returns whole traces and its
-in-memory store cuts the connection part-way through the large ones — 14 of 24 reads there —
-so `truncated response, retrying (n/20)` lines are the run absorbing a known failure, not
-hitting one. A dimension the session does not carry is reported NOT EXERCISED rather than
-passed, so a clean run never claims more than it checked.
+8c55cbcd, 525 spans, exercises every dimension. Jaeger's search returns whole traces and cuts
+the connection part-way through the large ones, so `truncated response, retrying (n/20)` lines
+are the run absorbing a known failure, not hitting one. It is the server doing that and not
+the store: it was measured under the memory store, and it survived the move to badger
+unchanged. `jaegerGet` in `scripts/verify-otlp.ts` carries the measurement and the retry
+budget it sizes — one copy, next to the constant it justifies, because it was a number drifting
+from its reason that broke this before. A dimension the session does not carry is reported NOT
+EXERCISED rather than passed, so a clean run never claims more than it checked.
 
 ## What this does not do
 
