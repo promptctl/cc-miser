@@ -14,7 +14,7 @@
 // Checking the request document instead would prove only that this project agrees with
 // itself, which `test/otlp.test.ts` already covers.
 //
-//   bun run verify:otlp <session-id-prefix> [jaeger-url]
+//   pnpm verify:otlp <session-id-prefix> [jaeger-url]
 //
 // Export first: `miser otlp --session <prefix>`.
 
@@ -32,7 +32,7 @@ const [prefix, jaegerArg] = process.argv.slice(2);
 // [LAW:one-source-of-truth]
 const JAEGER = jaegerArg ?? DEFAULT_JAEGER;
 if (prefix === undefined || prefix === '') {
-  console.error('usage: bun run verify:otlp <session-id-prefix> [jaeger-url]');
+  console.error('usage: pnpm verify:otlp <session-id-prefix> [jaeger-url]');
   process.exit(2);
 }
 
@@ -197,7 +197,7 @@ async function jaegerGet(url: string, attempts = 20): Promise<{ data: JaegerTrac
     if (code === 6 || code === 7 || code === 28)
       throw new Error(
         `cannot reach Jaeger at ${JAEGER} (curl ${code}: ${err.trim()}). ` +
-          `Is the stack up? \`bun run telemetry up && bun run telemetry verify\``,
+          `Is the stack up? \`pnpm telemetry up && pnpm telemetry verify\``,
       );
     // Everything left is a connected transfer that did not complete — curl 18 and its
     // relatives — which is the server closing part-way through a large body.

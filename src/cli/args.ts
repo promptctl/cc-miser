@@ -92,7 +92,7 @@ export const DEFAULT_RENDER_LIMIT = 24;
  * instead — the reasoning, and the one place both sets are written down, is
  * `telemetry/README.md` and `telemetry/stack.sh`. Defaulting to the port this repo's own
  * collector actually listens on is what makes `miser otlp` work with no flag after
- * `bun run telemetry up`; defaulting to 4318 would silently target whatever unrelated
+ * `pnpm telemetry up`; defaulting to 4318 would silently target whatever unrelated
  * collector happened to hold the standard port. */
 export const DEFAULT_ENDPOINT = 'http://localhost:14318/v1/traces';
 
