@@ -22,10 +22,10 @@ You need Apple's `container` CLI (`brew install container`) with the runtime sta
 ## Run it
 
 ```bash
-bun run telemetry up       # start Jaeger, the collector and Prometheus
-bun run telemetry verify   # prove spans actually reach Jaeger
-bun run telemetry down     # stop all three and remove them
-bun run telemetry status   # what is running, and which ports answer
+pnpm telemetry up       # start Jaeger, the collector and Prometheus
+pnpm telemetry verify   # prove spans actually reach Jaeger
+pnpm telemetry down     # stop all three and remove them
+pnpm telemetry status   # what is running, and which ports answer
 ```
 
 Jaeger's UI is at <http://localhost:17686>, Prometheus at <http://localhost:19090>.
@@ -89,7 +89,7 @@ the trace store.
 
 ## Check it worked
 
-`bun run telemetry verify` already answers this for the stack itself, so if it passed,
+`pnpm telemetry verify` already answers this for the stack itself, so if it passed,
 the collector and Jaeger are fine and any remaining problem is on Claude Code's side.
 
 For a real session, run a prompt, then look for the `claude_code.session.count` metric
@@ -134,8 +134,8 @@ Native traces begin when you switch telemetry on, so nothing in `~/.claude/proje
 reaches Jaeger on its own. `miser otlp` sends it:
 
 ```bash
-bun run miser otlp --session 8c55cbcd     # or --project, --since, --limit
-bun run verify:otlp 8c55cbcd              # prove it arrived, nested and filterable
+pnpm miser otlp --session 8c55cbcd     # or --project, --since, --limit
+pnpm verify:otlp 8c55cbcd              # prove it arrived, nested and filterable
 ```
 
 It posts to `localhost:14318` — this stack's OTLP/HTTP port — unless `--endpoint` says
@@ -177,7 +177,7 @@ what lets the HTML report link to a span it never exported.
 **Jaeger runs `badger` here, not the default memory store,** because badger replaces a
 re-sent span where the default accumulates both copies. That is the whole reason
 `telemetry/stack.sh` sets `SPAN_STORAGE_TYPE`; the measurement behind the choice is
-recorded there, and `bun run telemetry verify` re-checks it on the running container.
+recorded there, and `pnpm telemetry verify` re-checks it on the running container.
 
 The catch worth carrying: badger keys a span on `(traceId, startTime, spanId)`. A span
 re-sent with a *different* start time appends exactly like the memory store did. So the
@@ -192,7 +192,7 @@ What still needs a reset:
 becomes an orphan trace beside the new one — a different trace id is a different trace, so
 nothing supersedes anything. It shows up as `session.id` finding two traces.
 
-The store is ephemeral, so the reset is `bun run telemetry down && bun run telemetry up`.
+The store is ephemeral, so the reset is `pnpm telemetry down && pnpm telemetry up`.
 That still wipes everything, which is why it is reserved for the case above rather than
 being the routine way to refresh a session.
 

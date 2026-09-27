@@ -23,5 +23,6 @@
   },
   "peerDependencies": {
     "typescript": "^5"
-  }
+  },
+  "packageManager": "pnpm@10.28.2"
 }

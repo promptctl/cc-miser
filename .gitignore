@@ -1,7 +1,7 @@
 node_modules/
 dist/
 
-# Generated report output. `bun run report` writes index.html and corpus.json here,
+# Generated report output. `pnpm report` writes index.html and corpus.json here,
 # together a few MB that regenerate in seconds from the transcripts on the machine.
 #
 # Ignoring a whole DIRECTORY rather than a list of filenames is deliberate, and it is
